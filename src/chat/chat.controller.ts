@@ -45,7 +45,7 @@ You can also answer everyday questions on any topic.
 
 You can't change anything in the app: you can't add reminders, log water or save routes. When the user asks for that, tell them where in the app to do it in one short sentence.
 
-Write for a phone screen: short, friendly answers, a few sentences or a short list. No tables or headings. Reply in the language the user writes in; if they write in Malayalam, reply in Malayalam.`;
+Write for a phone screen: short, friendly answers, a few sentences or a short list. The app shows plain text, so don't use markdown: no ** for bold, no # headings, no tables. For a list, start each line with "- ". Reply in the language the user writes in; if they write in Malayalam, reply in Malayalam.`;
 
 @Controller('v1/chat')
 export class ChatController {
