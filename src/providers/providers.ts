@@ -380,13 +380,48 @@ export class WeatherProvider {
 
 // ---------- News (RSS) ----------
 
-export interface NewsItem { title: string; link: string; source: string; topic: string; published: string }
+export interface NewsItem {
+  title: string;
+  link: string;
+  source: string;
+  topic: string;
+  published: string;
+  /** Photo for the story (https), when the feed has one. */
+  image?: string;
+}
+
+/** The fields rss-parser reads for images: media:content / media:thumbnail (with attributes), enclosure, or an <img> in the HTML. */
+export interface FeedItemImages {
+  mediaContent?: { $?: { url?: string; medium?: string; type?: string } }[];
+  mediaThumbnail?: { $?: { url?: string } } | { $?: { url?: string } }[];
+  enclosure?: { url?: string; type?: string };
+  content?: string;
+  'content:encoded'?: string;
+}
+
+/** The story's photo from a feed item: the first https image URL found, else undefined. */
+export function itemImage(it: FeedItemImages): string | undefined {
+  const thumbs = Array.isArray(it.mediaThumbnail) ? it.mediaThumbnail : it.mediaThumbnail ? [it.mediaThumbnail] : [];
+  const candidates = [
+    ...(it.mediaContent ?? []).filter((m) => !m.$?.medium || m.$.medium === 'image' || m.$?.type?.startsWith('image/')).map((m) => m.$?.url),
+    ...thumbs.map((m) => m.$?.url),
+    it.enclosure && (!it.enclosure.type || it.enclosure.type.startsWith('image/')) ? it.enclosure.url : undefined,
+    /<img[^>]+src=["']([^"']+)["']/i.exec(it['content:encoded'] ?? it.content ?? '')?.[1],
+  ];
+  return candidates.map((u) => u?.trim().replace(/&amp;/g, '&')).find((u): u is string => !!u && /^https:\/\/\S+$/.test(u));
+}
 
 export type NewsLang = 'en' | 'ml';
 export const NEWS_LANGS: NewsLang[] = ['en', 'ml'];
 export const NEWS_TOPICS = ['Local', 'Kerala', 'India', 'World', 'Tech'];
 
-interface Feed { topic: string; source?: string; url: string }
+interface Feed {
+  topic: string;
+  source?: string;
+  url: string;
+  /** Used only when every other feed for the topic came back empty. */
+  backup?: boolean;
+}
 
 /** Google News feeds; titles end in " - Publisher". hl/gl/ceid pick the language edition. */
 const gn = (lang: NewsLang, path: string) => {
@@ -401,10 +436,21 @@ function feedsFor(lang: NewsLang, city: string): Feed[] {
   if (lang === 'ml') {
     return [
       { topic: 'Local', url: gnSearch('ml', `${city} when:2d`) },
-      { topic: 'Kerala', url: gnSearch('ml', 'കേരളം when:1d') },
-      { topic: 'India', url: gnTopic('ml', 'NATION') },
-      { topic: 'World', url: gnTopic('ml', 'WORLD') },
-      { topic: 'Tech', url: gnTopic('ml', 'TECHNOLOGY') },
+      // Malayalam publishers' own feeds: they carry a photo per story (Google News doesn't).
+      { topic: 'Kerala', source: 'Mathrubhumi', url: 'https://www.mathrubhumi.com/rss/news/kerala' },
+      { topic: 'Kerala', source: 'Asianet News', url: 'https://www.asianetnews.com/rss/kerala-news' },
+      { topic: 'Kerala', source: 'News18 Malayalam', url: 'https://malayalam.news18.com/commonfeeds/v1/mal/rss/kerala.xml' },
+      { topic: 'India', source: 'Mathrubhumi', url: 'https://www.mathrubhumi.com/rss/news/india' },
+      { topic: 'India', source: 'Asianet News', url: 'https://www.asianetnews.com/rss/india-news' },
+      { topic: 'India', source: 'News18 Malayalam', url: 'https://malayalam.news18.com/commonfeeds/v1/mal/rss/india.xml' },
+      { topic: 'World', source: 'Mathrubhumi', url: 'https://www.mathrubhumi.com/rss/news/world' },
+      { topic: 'World', source: 'News18 Malayalam', url: 'https://malayalam.news18.com/commonfeeds/v1/mal/rss/world.xml' },
+      { topic: 'World', source: 'Asianet News', url: 'https://www.asianetnews.com/rss/international-news' },
+      { topic: 'Tech', source: 'Mathrubhumi', url: 'https://www.mathrubhumi.com/rss/technology' },
+      { topic: 'Tech', source: 'News18 Malayalam', url: 'https://malayalam.news18.com/commonfeeds/v1/mal/rss/tech.xml' },
+      { topic: 'Tech', source: 'Asianet News', url: 'https://www.asianetnews.com/rss/technology' },
+      // If every publisher feed fails, Google News still covers Kerala (headlines only, no photos).
+      { topic: 'Kerala', url: gnSearch('ml', 'കേരളം when:1d'), backup: true },
     ];
   }
   return [
@@ -426,7 +472,11 @@ export function splitSource(title: string, fallback?: string): [string, string] 
 @Injectable()
 export class NewsProvider {
   private log = new Logger('News');
-  private parser = new Parser({ timeout: 12000, headers: { 'User-Agent': 'EverydayBuddy/0.1' } });
+  private parser: Parser<object, FeedItemImages> = new Parser({
+    timeout: 12000,
+    headers: { 'User-Agent': 'EverydayBuddy/0.1 (news reader)' },
+    customFields: { item: [['media:content', 'mediaContent', { keepArray: true }], ['media:thumbnail', 'mediaThumbnail']] as never },
+  });
   private cache = new TtlCache<NewsItem[]>();
   private pending = new Map<string, Promise<NewsItem[]>>();
 
@@ -465,7 +515,9 @@ export class NewsProvider {
         }
       }),
     );
+    const hasMain = new Set(results.filter((r) => !r.f.backup && r.items.length).map((r) => r.f.topic));
     for (const { f, items } of results) {
+      if (f.backup && hasMain.has(f.topic)) continue;
       for (const it of items) {
         if (!it.link || !it.title) continue;
         const [title, source] = splitSource(it.title, f.source);
@@ -473,7 +525,7 @@ export class NewsProvider {
         if (seen.has(it.link) || seen.has(k)) continue;
         seen.add(it.link);
         seen.add(k);
-        out.push({ title, link: it.link, source, topic: f.topic, published: it.isoDate ?? new Date().toISOString() });
+        out.push({ title, link: it.link.trim(), source, topic: f.topic, published: it.isoDate ?? new Date().toISOString(), image: itemImage(it) });
       }
     }
     const weekAgo = Date.now() - 7 * 864e5;

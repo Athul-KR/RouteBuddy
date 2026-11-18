@@ -77,3 +77,19 @@ describe('checkpoints', () => {
     expect(checkpoints(line, 250, 60).length).toBeLessThanOrEqual(60);
   });
 });
+
+import { itemImage } from '../providers/providers.js';
+
+describe('itemImage', () => {
+  it('reads media:content, media:thumbnail, enclosure and inline <img>', () => {
+    expect(itemImage({ mediaContent: [{ $: { url: 'https://a.example/1.jpg', medium: 'image' } }] })).toBe('https://a.example/1.jpg');
+    expect(itemImage({ mediaThumbnail: { $: { url: 'https://img.example/x.webp?f=16:9&amp;w=900' } } })).toBe('https://img.example/x.webp?f=16:9&w=900');
+    expect(itemImage({ enclosure: { url: 'https://e.example/2.png', type: 'image/png' } })).toBe('https://e.example/2.png');
+    expect(itemImage({ content: '<p><img class="x" src="https://c.example/3.jpg"></p>' })).toBe('https://c.example/3.jpg');
+  });
+  it('ignores non-image media, plain http and missing images', () => {
+    expect(itemImage({ mediaContent: [{ $: { url: 'https://v.example/clip.mp4', medium: 'video' } }] })).toBeUndefined();
+    expect(itemImage({ enclosure: { url: 'http://insecure.example/4.jpg' } })).toBeUndefined();
+    expect(itemImage({})).toBeUndefined();
+  });
+});
