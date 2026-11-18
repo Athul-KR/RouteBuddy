@@ -52,12 +52,15 @@ export function mainRoad(instructions: { routeOffsetInMeters: number; street?: s
 }
 
 /**
- * Trip minutes for a vehicle. TomTom's bicycle mode returns car-in-traffic times, so cycling is
- * timed from distance at an everyday commuting pace instead.
+ * Trip minutes for a vehicle. TomTom's bicycle mode returns car-in-traffic times, so cycling (and walking)
+ * is timed from distance at an everyday pace instead.
  */
 export const CYCLE_KMH = 15;
+export const WALK_KMH = 4.5;
 export function tripMinutes(vehicle: Vehicle, seconds: number, metres: number): number {
   if (vehicle === 'cycle') return Math.max(1, Math.round((metres / 1000 / CYCLE_KMH) * 60));
+  // Routers disagree on walking pace; one steady pace keeps the options comparable.
+  if (vehicle === 'walk') return Math.max(1, Math.round((metres / 1000 / WALK_KMH) * 60));
   return Math.round(seconds / 60);
 }
 
@@ -158,7 +161,11 @@ export class RoutingProvider {
   async options(from: [number, number], to: [number, number], vehicle: Vehicle): Promise<RouteOption[]> {
     const key = process.env.TOMTOM_KEY;
     let list: (RouteResult & { usualMin: number; via?: string })[] = [];
-    if (key && this.quota.take('tomtom-routing')) {
+    // Cycling and walking need no traffic data. TomTom's bike and foot paths often aren't on the map's roads,
+    // so those trips are planned on OpenStreetMap, the same roads the map shows.
+    const onMapRoads = vehicle === 'cycle' || vehicle === 'walk';
+    if (onMapRoads) list = await this.osmOptions(from, to, vehicle);
+    if (!list.length && key && this.quota.take('tomtom-routing')) {
       const mode = BYPASS_MODE[vehicle] ?? 'car';
       const url = `https://api.tomtom.com/routing/1/calculateRoute/${from[1]},${from[0]}:${to[1]},${to[0]}/json?key=${key}&traffic=true&travelMode=${mode}&routeType=fastest&maxAlternatives=2&computeTravelTimeFor=all&instructionsType=text&language=en-GB`;
       type Tt = { routes: { summary: { travelTimeInSeconds: number; noTrafficTravelTimeInSeconds?: number; lengthInMeters: number }; legs: { points: { latitude: number; longitude: number }[] }[]; guidance?: { instructions: { routeOffsetInMeters: number; street?: string }[] } }[] };
@@ -190,6 +197,30 @@ export class RoutingProvider {
       ...r,
       label: i === 0 ? 'Fastest' : r.distanceKm === shortest ? 'Shortest' : `Option ${i + 1}`,
     }));
+  }
+
+  /** Cycle and walk options on OpenStreetMap roads: Geoapify (when a key is set) and the free router's alternatives. */
+  private async osmOptions(from: [number, number], to: [number, number], vehicle: Vehicle): Promise<(RouteResult & { usualMin: number })[]> {
+    const v = VEHICLES[vehicle] ?? VEHICLES.car;
+    const timed = (geometry: [number, number][], seconds: number, metres: number) => {
+      const minutes = tripMinutes(vehicle, seconds, metres);
+      return { geometry, minutes, usualMin: minutes, distanceKm: Math.round(metres / 100) / 10 };
+    };
+    const geoapify = async () => {
+      const key = process.env.GEOAPIFY_KEY;
+      if (!key || !this.quota.take('geoapify-routing')) return [];
+      const mode = vehicle === 'cycle' ? 'bicycle' : 'walk';
+      type Ga = { features?: { geometry: { coordinates: [number, number][][] }; properties: { distance: number; time: number } }[] };
+      const data = await getJson<Ga>(`https://api.geoapify.com/v1/routing?waypoints=${from[1]},${from[0]}|${to[1]},${to[0]}&mode=${mode}&apiKey=${key}`);
+      return (data.features ?? []).map((f) => timed(f.geometry.coordinates.flat(), f.properties.time, f.properties.distance));
+    };
+    const osrm = async () => {
+      const url = `https://routing.openstreetmap.de/${v.profile}/route/v1/driving/${from[0]},${from[1]};${to[0]},${to[1]}?overview=full&geometries=geojson&alternatives=3`;
+      const data = await getJson<{ routes?: { geometry: { coordinates: [number, number][] }; duration: number; distance: number }[] }>(url);
+      return (data.routes ?? []).map((r) => timed(r.geometry.coordinates, r.duration * v.factor, r.distance));
+    };
+    const [a, b] = await Promise.all([geoapify().catch(() => []), osrm().catch(() => [])]);
+    return [...a, ...b];
   }
 
   /** Travel time right now, with traffic, from TomTom. Returns null when there is no key or quota. */

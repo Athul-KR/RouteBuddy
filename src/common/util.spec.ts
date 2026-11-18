@@ -58,6 +58,7 @@ describe('tripMinutes', () => {
     // TomTom's bicycle mode said 22 min for 7.1 km (car speed); at 15 km/h it is 28 min.
     expect(tripMinutes('cycle', 22 * 60, 7100)).toBe(28);
     expect(tripMinutes('car', 22 * 60, 7400)).toBe(22);
+    expect(tripMinutes('walk', 85 * 60, 4500)).toBe(60);
   });
 });
 
