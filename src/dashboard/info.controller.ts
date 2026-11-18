@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { Public, UserId } from '../common/auth.js';
 import { AppNotification, DEFAULT_SETTINGS, Reminder, SavedRoute, User, WaterLog } from '../common/entities.js';
 import { today } from '../common/util.js';
+import { waterSummary } from '../reminders/water.js';
 import { NEWS_LANGS, NewsLang, NewsProvider, PlacesProvider, WeatherProvider } from '../providers/providers.js';
 import { QuotaService } from '../providers/quota.service.js';
 import { forToday } from '../reminders/reminders.controller.js';
@@ -85,7 +86,7 @@ export class InfoController {
       commute: next && status ? { route: { ...next.route, geometry: next.route.geometry }, inMin: Number.isFinite(next.inMin) ? next.inMin : null, status } : null,
       headlines,
       reminders: forToday(await this.reminders.findBy({ userId }), d),
-      water: { count: await this.water.countBy({ userId, date: d }), goal: settings.waterGoal },
+      water: { ...(await waterSummary(this.water, userId, settings.waterGoalMl)), goal: settings.waterGoal },
       unread: await this.notes.countBy({ userId, read: false }),
     };
   }

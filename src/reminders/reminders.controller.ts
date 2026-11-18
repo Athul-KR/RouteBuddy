@@ -1,22 +1,36 @@
 import { Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsBoolean, IsIn, IsNotEmpty, IsOptional, IsString, Matches } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsNotEmpty, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { Repository } from 'typeorm';
 import { UserId } from '../common/auth.js';
-import { Reminder, WaterLog } from '../common/entities.js';
+import { DEFAULT_SETTINGS, Reminder, User, WaterLog } from '../common/entities.js';
+import { waterSummary } from './water.js';
 import { defined, today } from '../common/util.js';
 
+const PRIORITIES = ['high', 'medium', 'low'];
+
+class WaterDto {
+  @IsOptional() @IsInt() @Min(50) @Max(1500) ml?: number;
+}
+
 class CreateReminderDto {
-  @IsString() @IsNotEmpty() title: string;
+  @IsString() @IsNotEmpty() @MaxLength(120) title: string;
   @Matches(/^\d{2}:\d{2}$/) time: string;
   @IsOptional() @IsIn(['once', 'daily']) repeat?: string;
   @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/) date?: string;
+  @IsOptional() @IsIn(PRIORITIES) priority?: string;
+  @IsOptional() @IsString() @MaxLength(500) note?: string;
+  @IsOptional() @IsBoolean() notify?: boolean;
 }
 
 class UpdateReminderDto {
   @IsOptional() @IsString() @IsNotEmpty() title?: string;
   @IsOptional() @Matches(/^\d{2}:\d{2}$/) time?: string;
   @IsOptional() @IsIn(['once', 'daily']) repeat?: string;
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/) date?: string;
+  @IsOptional() @IsIn(PRIORITIES) priority?: string;
+  @IsOptional() @IsString() @MaxLength(500) note?: string;
+  @IsOptional() @IsBoolean() notify?: boolean;
   @IsOptional() @IsBoolean() done?: boolean;
 }
 
@@ -33,7 +47,13 @@ export class RemindersController {
   constructor(
     @InjectRepository(Reminder) private reminders: Repository<Reminder>,
     @InjectRepository(WaterLog) private water: Repository<WaterLog>,
+    @InjectRepository(User) private users: Repository<User>,
   ) {}
+
+  private async goalMl(userId: number) {
+    const u = await this.users.findOneBy({ id: userId });
+    return { ...DEFAULT_SETTINGS, ...u?.settings }.waterGoalMl;
+  }
 
   private async own(userId: number, id: number) {
     const r = await this.reminders.findOneBy({ id, userId });
@@ -77,14 +97,16 @@ export class RemindersController {
     await this.reminders.remove(await this.own(userId, id));
   }
 
+  /** Today's water in ml, the last 7 days and the streak. */
   @Get('water-logs')
   async waterToday(@UserId() userId: number) {
-    return { date: today(), count: await this.water.countBy({ userId, date: today() }) };
+    return waterSummary(this.water, userId, await this.goalMl(userId));
   }
 
+  /** Logs one drink: 250 ml (a glass) unless the body says otherwise. */
   @Post('water-logs')
-  async logWater(@UserId() userId: number) {
-    await this.water.save(this.water.create({ userId, date: today() }));
+  async logWater(@UserId() userId: number, @Body() d: WaterDto) {
+    await this.water.save(this.water.create({ userId, date: today(), ml: d?.ml ?? 250 }));
     return this.waterToday(userId);
   }
 

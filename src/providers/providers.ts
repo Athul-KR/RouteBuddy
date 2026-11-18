@@ -321,11 +321,16 @@ export class TrafficProvider {
 // ---------- Weather (MET Norway) ----------
 
 export interface Weather {
-  now: { temp: number; symbol: string; humidity: number; wind: number };
+  now: { temp: number; symbol: string; humidity: number; wind: number; feels: number; uv: number; dewPoint: number };
   hourly: { time: string; temp: number; symbol: string; rainMm: number }[];
-  daily: { date: string; min: number; max: number; symbol: string; rainMm: number }[];
+  daily: { date: string; min: number; max: number; symbol: string; rainMm: number; uvMax: number }[];
   rainSoon: { from: string; to: string } | null;
+  /** Today's sunrise and sunset, local HH:mm, when known. */
+  sun: { rise: string; set: string } | null;
 }
+
+/** Local HH:mm from MET's "2026-11-18T06:15+05:30". */
+const hhmm = (iso?: string) => (iso && /T(\d{2}:\d{2})/.exec(iso)?.[1]) || '';
 
 @Injectable()
 export class WeatherProvider {
@@ -339,7 +344,7 @@ export class WeatherProvider {
     if (hit) return hit;
     type Ts = { time: string; data: { instant: { details: any }; next_1_hours?: { summary: { symbol_code: string }; details: { precipitation_amount: number } }; next_6_hours?: { summary: { symbol_code: string }; details: { precipitation_amount: number } } } };
     const data = await getJson<{ properties: { timeseries: Ts[] } }>(
-      `https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${la}&lon=${lo}`,
+      `https://api.met.no/weatherapi/locationforecast/2.0/complete?lat=${la}&lon=${lo}`,
     );
     const ts = data.properties.timeseries;
     const d0 = ts[0].data;
@@ -349,19 +354,26 @@ export class WeatherProvider {
       symbol: t.data.next_1_hours?.summary.symbol_code ?? t.data.next_6_hours?.summary.symbol_code ?? 'cloudy',
       rainMm: t.data.next_1_hours?.details.precipitation_amount ?? 0,
     }));
-    const days = new Map<string, { min: number; max: number; symbol: string; rainMm: number }>();
+    const days = new Map<string, { min: number; max: number; symbol: string; rainMm: number; uvMax: number }>();
     for (const t of ts) {
       const date = new Date(t.time).toLocaleDateString('en-CA', { timeZone: process.env.TZ_NAME ?? 'Asia/Kolkata' });
       const temp = t.data.instant.details.air_temperature;
-      const d = days.get(date) ?? { min: temp, max: temp, symbol: '', rainMm: 0 };
+      const d = days.get(date) ?? { min: temp, max: temp, symbol: '', rainMm: 0, uvMax: 0 };
       d.min = Math.min(d.min, temp); d.max = Math.max(d.max, temp);
+      d.uvMax = Math.max(d.uvMax, t.data.instant.details.ultraviolet_index_clear_sky ?? 0);
       if (!d.symbol && t.data.next_6_hours && new Date(t.time).getUTCHours() >= 6) d.symbol = t.data.next_6_hours.summary.symbol_code;
       d.rainMm += t.data.next_1_hours?.details.precipitation_amount ?? 0;
       days.set(date, d);
     }
     const daily = [...days.entries()].slice(0, 7).map(([date, d]) => ({
-      date, min: Math.round(d.min), max: Math.round(d.max), symbol: d.symbol || 'cloudy', rainMm: Math.round(d.rainMm * 10) / 10,
+      date, min: Math.round(d.min), max: Math.round(d.max), symbol: d.symbol || 'cloudy', rainMm: Math.round(d.rainMm * 10) / 10, uvMax: Math.round(d.uvMax),
     }));
+    const tz = process.env.TZ_NAME ?? 'Asia/Kolkata';
+    const offset = new Intl.DateTimeFormat('en', { timeZone: tz, timeZoneName: 'longOffset' }).formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value.replace('GMT', '') || '+05:30';
+    const sunData = await getJson<{ properties: { sunrise?: { time?: string }; sunset?: { time?: string } } }>(
+      `https://api.met.no/weatherapi/sunrise/3.0/sun?lat=${la}&lon=${lo}&date=${daily[0]?.date}&offset=${encodeURIComponent(offset)}`,
+    ).catch(() => null);
+    const rise = hhmm(sunData?.properties.sunrise?.time), set = hhmm(sunData?.properties.sunset?.time);
     const wet = hourly.slice(0, 12).filter((h) => h.rainMm >= 0.3);
     const w: Weather = {
       now: {
@@ -369,7 +381,11 @@ export class WeatherProvider {
         symbol: d0.next_1_hours?.summary.symbol_code ?? 'cloudy',
         humidity: Math.round(d0.instant.details.relative_humidity),
         wind: Math.round(d0.instant.details.wind_speed * 3.6),
+        feels: Math.round(d0.instant.details.apparent_air_temperature ?? d0.instant.details.air_temperature),
+        uv: Math.round(d0.instant.details.ultraviolet_index_clear_sky ?? 0),
+        dewPoint: Math.round(d0.instant.details.dew_point_temperature ?? 0),
       },
+      sun: rise && set ? { rise, set } : null,
       hourly, daily,
       rainSoon: wet.length ? { from: wet[0].time, to: wet[wet.length - 1].time } : null,
     };
@@ -388,7 +404,35 @@ export interface NewsItem {
   published: string;
   /** Photo for the story (https), when the feed has one. */
   image?: string;
+  /** A sentence or two from the feed, plain text, when it has one. Never the full article. */
+  summary?: string;
 }
+
+/**
+ * Some feeds (Janayugom's section feeds) contain a bare "&" (e.g. "Kerala & India"), which strict XML parsers reject.
+ * Escape any "&" that doesn't start an entity.
+ */
+export function repairXml(xml: string): string {
+  return xml.replace(/&(?!(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+}
+
+/** Plain-text summary: tags and "Read more" links removed, cut at about 280 characters on a word. */
+export function summaryOf(html?: string): string | undefined {
+  if (!html) return undefined;
+  const text = html.replace(/<a[^>]*class="moretag"[\s\S]*?<\/a>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/g, ' ').replace(/&amp;/g, '&').replace(/&#x200d;|&#8203;/gi, '').replace(/\s+/g, ' ').trim();
+  if (text.length < 20) return undefined;
+  if (text.length <= 280) return text;
+  const cut = text.slice(0, 280);
+  return cut.slice(0, cut.lastIndexOf(' ') > 200 ? cut.lastIndexOf(' ') : 280) + '…';
+}
+
+/** Janayugom's section for each Kerala district (Kochi is filed under Ernakulam). */
+const JANAYUGOM_DISTRICT: Record<string, string> = {
+  thiruvananthapuram: 'thiruvananthapuram', trivandrum: 'thiruvananthapuram', kochi: 'ernakulam', ernakulam: 'ernakulam', cochin: 'ernakulam',
+  kozhikode: 'kozhikode', calicut: 'kozhikode', thrissur: 'thrissur', kollam: 'kollam', kannur: 'kannur', alappuzha: 'alappuzha',
+  kottayam: 'kottayam', palakkad: 'palakkad', malappuram: 'malappuram', pathanamthitta: 'pathanamthitta', idukki: 'idukki',
+  wayanad: 'wayanad', kasaragod: 'kasaragod',
+};
 
 /** The fields rss-parser reads for images: media:content / media:thumbnail (with attributes), enclosure, or an <img> in the HTML. */
 export interface FeedItemImages {
@@ -436,7 +480,11 @@ function feedsFor(lang: NewsLang, city: string): Feed[] {
   if (lang === 'ml') {
     return [
       { topic: 'Local', url: gnSearch('ml', `${city} when:2d`) },
+      ...(JANAYUGOM_DISTRICT[city.toLowerCase()] ? [{ topic: 'Local', source: 'Janayugom', url: `https://janayugomonline.com/category/${JANAYUGOM_DISTRICT[city.toLowerCase()]}/feed/` }] : []),
       // Malayalam publishers' own feeds: they carry a photo per story (Google News doesn't).
+      { topic: 'Kerala', source: 'Janayugom', url: 'https://janayugomonline.com/category/kerala/feed/' },
+      { topic: 'India', source: 'Janayugom', url: 'https://janayugomonline.com/category/india/feed/' },
+      { topic: 'World', source: 'Janayugom', url: 'https://janayugomonline.com/category/world/feed/' },
       { topic: 'Kerala', source: 'Mathrubhumi', url: 'https://www.mathrubhumi.com/rss/news/kerala' },
       { topic: 'Kerala', source: 'Asianet News', url: 'https://www.asianetnews.com/rss/kerala-news' },
       { topic: 'Kerala', source: 'News18 Malayalam', url: 'https://malayalam.news18.com/commonfeeds/v1/mal/rss/kerala.xml' },
@@ -508,7 +556,9 @@ export class NewsProvider {
     const results = await Promise.all(
       feedsFor(lang, city).map(async (f) => {
         try {
-          return { f, items: (await this.parser.parseURL(f.url)).items.slice(0, 20) };
+          const res = await fetch(f.url, { headers: { 'User-Agent': 'EverydayBuddy/0.1 (news reader)' }, signal: AbortSignal.timeout(12000) });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return { f, items: (await this.parser.parseString(repairXml(await res.text()))).items.slice(0, 20) };
         } catch (e) {
           this.log.warn(`Feed failed: ${f.url} (${(e as Error).message})`);
           return { f, items: [] };
@@ -525,7 +575,7 @@ export class NewsProvider {
         if (seen.has(it.link) || seen.has(k)) continue;
         seen.add(it.link);
         seen.add(k);
-        out.push({ title, link: it.link.trim(), source, topic: f.topic, published: it.isoDate ?? new Date().toISOString(), image: itemImage(it) });
+        out.push({ title, link: it.link.trim(), source, topic: f.topic, published: it.isoDate ?? new Date().toISOString(), image: itemImage(it), summary: summaryOf(it.contentSnippet ?? it.content ?? (it as { summary?: string }).summary) });
       }
     }
     const weekAgo = Date.now() - 7 * 864e5;

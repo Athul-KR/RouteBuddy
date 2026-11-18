@@ -12,7 +12,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsString, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
 import { Repository } from 'typeorm';
 import { UserId } from '../common/auth.js';
 import { DEFAULT_SETTINGS, Reminder, SavedRoute, User, WaterLog } from '../common/entities.js';
@@ -21,15 +21,23 @@ import { PlacesProvider, RoutingProvider, WeatherProvider } from '../providers/p
 import { Changed, chatTools } from './chat.tools.js';
 import { forToday } from '../reminders/reminders.controller.js';
 import { RouteStatusService } from '../routes/route-status.service.js';
+import { waterSummary } from '../reminders/water.js';
 
 class ChatMessageDto {
   @IsIn(['user', 'assistant']) role: 'user' | 'assistant';
   @IsString() @MinLength(1) @MaxLength(2000) content: string;
 }
 
+/** Data that lives only on the phone, sent along so Buddy can answer about it. */
+class DeviceDto {
+  @IsOptional() @IsInt() @Min(0) @Max(200000) steps?: number;
+  @IsOptional() @IsInt() @Min(0) @Max(200000) stepsGoal?: number;
+}
+
 class ChatDto {
   @IsArray() @ArrayMinSize(1) @ArrayMaxSize(40) @ValidateNested({ each: true }) @Type(() => ChatMessageDto)
   messages: ChatMessageDto[];
+  @IsOptional() @ValidateNested() @Type(() => DeviceDto) device?: DeviceDto;
 }
 
 const MODEL = 'claude-opus-5-5';
@@ -40,7 +48,7 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const SYSTEM = `You are Buddy, the assistant inside Everyday Buddy, a daily companion app used mostly in Kerala, India.
 The app tracks the user's saved commute routes (with live traffic, closures and a bypass when a road is blocked), reminders, water intake, weather and local news.
 
-Each conversation includes a snapshot of the user's data at the moment of the question. Use it to answer questions about their routes, today's plan, water intake and weather. Quote times and numbers from the snapshot rather than estimating. If something isn't in the snapshot, say so plainly instead of guessing, and point to the part of the app that has it (Routes, Reminders, Explore).
+Each conversation includes a snapshot of the user's data at the moment of the question. Use it to answer questions about their routes, today's plan, water intake and weather. Quote times and numbers from the snapshot rather than estimating. If something isn't in the snapshot, say so plainly instead of guessing, and point to the part of the app that has it (Routes, Reminders, News, My Health).
 
 You can also answer everyday questions on any topic.
 
@@ -72,7 +80,7 @@ export class ChatController {
   ) {}
 
   /** The user's data right now, as plain text for the model. Each part fails on its own. */
-  private async snapshot(user: User): Promise<string> {
+  private async snapshot(user: User, device?: DeviceDto): Promise<string> {
     const userId = user.id;
     const settings = { ...DEFAULT_SETTINGS, ...user.settings };
     const now = localParts();
@@ -104,8 +112,8 @@ export class ChatController {
         : 'Today\'s reminders: none.',
     );
 
-    const glasses = await this.water.countBy({ userId, date: d });
-    lines.push(settings.waterOn ? `Water today: ${glasses} of ${settings.waterGoal} glasses.` : 'Water tracking: turned off.');
+    const wt = await waterSummary(this.water, userId, settings.waterGoalMl);
+    lines.push(settings.waterOn ? `Water today: ${wt.ml} ml of ${wt.goalMl} ml goal (${wt.count} drinks). Goal streak: ${wt.streak} day(s).` : 'Water tracking: turned off.');
 
     const w = await this.weather.forecast(user.lat, user.lon).catch(() => null);
     if (w) {
@@ -115,6 +123,7 @@ export class ChatController {
       if (w.rainSoon) line += ` Rain expected ${w.rainSoon.from}-${w.rainSoon.to}.`;
       lines.push(line);
     }
+    if (device?.steps !== undefined) lines.push(`Steps today (from the phone): ${device.steps}${device.stepsGoal ? ` of ${device.stepsGoal} goal` : ''}.`);
     return lines.join('\n');
   }
 
@@ -137,7 +146,7 @@ export class ChatController {
     // Fresh data for this question, as an operator message right after it.
     const user = await this.users.findOneBy({ id: userId });
     if (!user) throw new NotFoundException();
-    messages.push({ role: 'system', content: `Snapshot of the user's data:\n${await this.snapshot(user)}` });
+    messages.push({ role: 'system', content: `Snapshot of the user's data:\n${await this.snapshot(user, dto.device)}` });
 
     const changed = new Set<Changed>();
     const tools = chatTools({ user, water: this.water, reminders: this.reminders, routes: this.routes, places: this.places, routing: this.routing }, changed);

@@ -93,3 +93,26 @@ describe('itemImage', () => {
     expect(itemImage({})).toBeUndefined();
   });
 });
+
+import { summaryOf } from '../providers/providers.js';
+
+describe('summaryOf', () => {
+  it('strips tags and the Read more link, and keeps short summaries whole', () => {
+    expect(summaryOf('<p>നടുറോഡിൽ യുവാവിനെ ആക്രമിച്ചു. പോലീസ് അന്വേഷണം തുടങ്ങി.<a class="moretag" href="x"> ... Read more</a></p>'))
+      .toBe('നടുറോഡിൽ യുവാവിനെ ആക്രമിച്ചു. പോലീസ് അന്വേഷണം തുടങ്ങി.');
+  });
+  it('cuts long text on a word and drops empty ones', () => {
+    const s = summaryOf('word '.repeat(100))!;
+    expect(s.length).toBeLessThanOrEqual(281);
+    expect(s.endsWith('…')).toBe(true);
+    expect(summaryOf('<p> </p>')).toBeUndefined();
+  });
+});
+
+import { repairXml } from '../providers/providers.js';
+
+describe('repairXml', () => {
+  it('escapes bare ampersands and keeps real entities', () => {
+    expect(repairXml('<t>Kerala & India &amp; World &#8217; &#x200d; &nbsp;</t>')).toBe('<t>Kerala &amp; India &amp; World &#8217; &#x200d; &nbsp;</t>');
+  });
+});

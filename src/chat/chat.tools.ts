@@ -1,6 +1,7 @@
 import { betaTool } from '@anthropic-ai/sdk/helpers/beta/json-schema';
 import type { Repository } from 'typeorm';
-import type { Reminder, SavedRoute, User, Vehicle, WaterLog } from '../common/entities.js';
+import { DEFAULT_SETTINGS, type Reminder, type SavedRoute, type User, type Vehicle, type WaterLog } from '../common/entities.js';
+import { waterSummary } from '../reminders/water.js';
 import { today } from '../common/util.js';
 import type { Place, PlacesProvider, RoutingProvider } from '../providers/providers.js';
 
@@ -56,21 +57,26 @@ export function chatTools(d: ToolDeps, changed: Set<Changed>) {
 
   const logWater = betaTool({
     name: 'log_water',
-    description: 'Log glasses of water the user drank today. Use when the user says they drank water or asks to log it.',
+    description:
+      'Log water the user drank today, in millilitres. A cup is 150 ml, a glass 250 ml, a bottle 500 ml. ' +
+      'Use when the user says they drank water or asks to log it.',
     strict: true,
     inputSchema: {
       type: 'object',
-      properties: { glasses: { type: 'integer', description: 'Number of glasses to log, 1 to 10. One glass if the user did not say.' } },
-      required: ['glasses'],
+      properties: { ml: { type: 'integer', description: 'Millilitres, 50 to 3000. 250 (one glass) if the user did not say.' } },
+      required: ['ml'],
       additionalProperties: false,
     },
-    run: async ({ glasses }) => {
-      if (!Number.isInteger(glasses) || glasses < 1 || glasses > 10) return 'Error: glasses must be a whole number from 1 to 10.';
+    run: async ({ ml }) => {
+      if (!Number.isInteger(ml) || ml < 50 || ml > 3000) return 'Error: ml must be a whole number from 50 to 3000.';
       const date = today();
-      await d.water.save(Array.from({ length: glasses }, () => d.water.create({ userId, date })));
+      // Each entry holds at most 1,500 ml, so a large amount is split into a few entries.
+      const parts: number[] = [];
+      for (let left = ml; left > 0; left -= 1500) parts.push(Math.min(1500, left));
+      await d.water.save(parts.map((p) => d.water.create({ userId, date, ml: p })));
       changed.add('water');
-      const total = await d.water.countBy({ userId, date });
-      return `Logged ${glasses} glass(es). Total today: ${total} of goal ${d.user.settings?.waterGoal ?? 8}.`;
+      const w = await waterSummary(d.water, userId, { ...DEFAULT_SETTINGS, ...d.user.settings }.waterGoalMl);
+      return `Logged ${ml} ml. Total today: ${w.ml} ml of ${w.goalMl} ml.`;
     },
   });
 
@@ -86,17 +92,21 @@ export function chatTools(d: ToolDeps, changed: Set<Changed>) {
         title: { type: 'string', description: 'Short title, e.g. "Call mom". In the language the user used.' },
         time: { type: 'string', description: '24-hour time HH:mm, India time.' },
         repeat: { type: 'string', enum: ['once', 'daily'] },
+        priority: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Medium unless the user says it is important (high) or minor (low).' },
+        note: { type: 'string', description: 'Extra detail the user gave, or an empty string.' },
         date: { type: 'string', description: 'YYYY-MM-DD for a one-off reminder. For daily reminders, today\'s date.' },
       },
-      required: ['title', 'time', 'repeat', 'date'],
+      required: ['title', 'time', 'repeat', 'date', 'priority', 'note'],
       additionalProperties: false,
     },
-    run: async ({ title, time, repeat, date }) => {
+    run: async ({ title, time, repeat, date, priority, note }) => {
       const t = title.trim().slice(0, 120);
       if (!t) return 'Error: the reminder needs a title.';
       if (!HHMM.test(time)) return 'Error: time must be HH:mm in 24-hour format, e.g. 18:30.';
       if (repeat === 'once' && (!DATE.test(date) || date < today())) return `Error: date must be YYYY-MM-DD, today (${today()}) or later.`;
-      const r = await d.reminders.save(d.reminders.create({ userId, title: t, time, repeat, date: repeat === 'once' ? date : undefined }));
+      const r = await d.reminders.save(
+        d.reminders.create({ userId, title: t, time, repeat, date: repeat === 'once' ? date : undefined, priority, note: note.trim().slice(0, 500) || null }),
+      );
       changed.add('reminders');
       return `Added reminder "${r.title}" at ${r.time}, ${repeat === 'daily' ? 'every day' : `on ${date}`}.`;
     },

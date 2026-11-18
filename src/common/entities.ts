@@ -18,6 +18,8 @@ export interface UserSettings {
   waterOn: boolean;
   /** News language: 'ml' Malayalam or 'en' English. */
   newsLang: 'en' | 'ml';
+  /** Daily water goal in millilitres. */
+  waterGoalMl: number;
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
@@ -35,6 +37,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   walkReminder: false,
   waterOn: true,
   newsLang: 'ml',
+  waterGoalMl: 2500,
 };
 
 @Entity()
@@ -102,6 +105,11 @@ export class Reminder {
   @Column({ nullable: true }) date: string;
   /** YYYY-MM-DD the reminder was last marked done */
   @Column({ nullable: true }) doneOn: string;
+  /** 'high' | 'medium' | 'low' */
+  @Column({ type: 'varchar', default: 'medium' }) priority: string;
+  @Column({ type: 'varchar', nullable: true }) note: string | null;
+  /** Send a notification at the reminder's time. */
+  @Column({ default: true }) notify: boolean;
   @CreateDateColumn() createdAt: Date;
 }
 
@@ -111,6 +119,8 @@ export class WaterLog {
   @Index() @Column() userId: number;
   /** YYYY-MM-DD */
   @Index() @Column() date: string;
+  /** Millilitres in this drink; older logs were one 250 ml glass each. */
+  @Column({ type: 'int', default: 250 }) ml: number;
   @CreateDateColumn() createdAt: Date;
 }
 

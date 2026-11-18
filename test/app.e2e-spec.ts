@@ -101,6 +101,27 @@ describe('Everyday Buddy API (e2e)', () => {
     expect(two.body.count).toBe(2);
     const undo = await request(app.getHttpServer()).delete('/v1/water-logs/last').set(auth()).expect(200);
     expect(undo.body.count).toBe(1);
+    // Amounts in ml: a default glass is 250 ml, a bottle can be logged as 500.
+    expect(undo.body.ml).toBe(250);
+    const bottle = await request(app.getHttpServer()).post('/v1/water-logs').set(auth()).send({ ml: 500 }).expect(201);
+    expect(bottle.body).toMatchObject({ ml: 750, count: 2, goalMl: 2500, last: { ml: 500 } });
+    expect(bottle.body.history).toHaveLength(7);
+    expect(bottle.body.history[6].ml).toBe(750);
+    await request(app.getHttpServer()).post('/v1/water-logs').set(auth()).send({ ml: 5000 }).expect(400);
+    await request(app.getHttpServer()).delete('/v1/water-logs/last').set(auth()).expect(200);
+  });
+
+  it('keeps a reminder\'s priority, note and notification switch', async () => {
+    const r = await request(app.getHttpServer()).post('/v1/reminders').set(auth())
+      .send({ title: 'Dentist', time: '10:00', priority: 'high', note: 'Bring the X-ray', notify: false }).expect(201);
+    expect(r.body).toMatchObject({ priority: 'high', note: 'Bring the X-ray', notify: false });
+    const plain = await request(app.getHttpServer()).post('/v1/reminders').set(auth()).send({ title: 'Call', time: '11:00' }).expect(201);
+    expect(plain.body).toMatchObject({ priority: 'medium', notify: true });
+    await request(app.getHttpServer()).post('/v1/reminders').set(auth()).send({ title: 'Bad', time: '11:00', priority: 'urgent' }).expect(400);
+    const upd = await request(app.getHttpServer()).patch(`/v1/reminders/${r.body.id}`).set(auth()).send({ priority: 'low' }).expect(200);
+    expect(upd.body).toMatchObject({ priority: 'low', note: 'Bring the X-ray', title: 'Dentist' });
+    await request(app.getHttpServer()).delete(`/v1/reminders/${r.body.id}`).set(auth()).expect(204);
+    await request(app.getHttpServer()).delete(`/v1/reminders/${plain.body.id}`).set(auth()).expect(204);
   });
 
   it('exports and deletes the account', async () => {
