@@ -1,7 +1,7 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import Parser from 'rss-parser';
 import type { Vehicle } from '../common/entities.js';
-import { TtlCache } from '../common/util.js';
+import { distanceToLine, haversine, TtlCache } from '../common/util.js';
 import { QuotaService } from './quota.service.js';
 
 /**
@@ -51,6 +51,42 @@ export function mainRoad(instructions: { routeOffsetInMeters: number; street?: s
   return [...byStreet.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
 }
 
+/**
+ * Trip minutes for a vehicle. TomTom's bicycle mode returns car-in-traffic times, so cycling is
+ * timed from distance at an everyday commuting pace instead.
+ */
+export const CYCLE_KMH = 15;
+export function tripMinutes(vehicle: Vehicle, seconds: number, metres: number): number {
+  if (vehicle === 'cycle') return Math.max(1, Math.round((metres / 1000 / CYCLE_KMH) * 60));
+  return Math.round(seconds / 60);
+}
+
+/** Compass bearing (0-359) from a to b, both [lon, lat]. */
+export function bearing(a: [number, number], b: [number, number]): number {
+  const rad = Math.PI / 180;
+  const y = Math.sin((b[0] - a[0]) * rad) * Math.cos(b[1] * rad);
+  const x = Math.cos(a[1] * rad) * Math.sin(b[1] * rad) - Math.sin(a[1] * rad) * Math.cos(b[1] * rad) * Math.cos((b[0] - a[0]) * rad);
+  return Math.round((Math.atan2(y, x) / rad + 360) % 360);
+}
+
+/** Checkpoints along a path, about every `spacing` metres (at most `max`), each with its index and direction of travel. */
+export function checkpoints(line: [number, number][], spacing: number, max: number): { p: [number, number]; i: number; heading: number }[] {
+  if (line.length < 2) return [];
+  const total = line.slice(1).reduce((s, p, i) => s + haversine(line[i], p), 0);
+  const step = Math.max(spacing, total / (max - 2));
+  const out: { p: [number, number]; i: number; heading: number }[] = [];
+  let run = 0, next = 0;
+  for (let i = 0; i < line.length - 1; i++) {
+    const seg = haversine(line[i], line[i + 1]);
+    if (seg === 0) continue;
+    if (run >= next && out.length < max - 1) { out.push({ p: line[i], i, heading: bearing(line[i], line[i + 1]) }); next = run + step; }
+    run += seg;
+  }
+  const n = line.length;
+  out.push({ p: line[n - 1], i: n - 1, heading: bearing(line[n - 2], line[n - 1]) });
+  return out;
+}
+
 export interface LiveRoute {
   minutes: number;
   delayMin: number;
@@ -74,6 +110,47 @@ export class RoutingProvider {
     };
   }
 
+  private snapPausedUntil = 0;
+
+  /**
+   * Redraws a TomTom path on OpenStreetMap roads, which is what the map tiles show: TomTom's road data can sit
+   * 10-20 m off the map's roads. The free router follows checkpoints along the same path, each with its direction
+   * of travel so it keeps to the right carriageway. Each stretch between checkpoints uses the redrawn line only when
+   * TomTom's path lies along it; elsewhere TomTom's own line stays.
+   */
+  async snapToMap(geometry: [number, number][], vehicle: Vehicle): Promise<[number, number][]> {
+    const cps = checkpoints(geometry, 250, 60);
+    // The free router is a shared public server: never let it slow a trip plan down.
+    if (cps.length < 2 || Date.now() < this.snapPausedUntil) return geometry;
+    const v = VEHICLES[vehicle] ?? VEHICLES.car;
+    const coords = cps.map((c) => `${c.p[0].toFixed(6)},${c.p[1].toFixed(6)}`).join(';');
+    // No direction at the two ends: the start or destination may sit on a lane the map doesn't have.
+    const bearings = cps.map((c, i) => (i === 0 || i === cps.length - 1 ? '' : `${c.heading},90`)).join(';');
+    const url = `https://routing.openstreetmap.de/${v.profile}/route/v1/driving/${coords}?overview=false&steps=true&geometries=geojson&continue_straight=true&bearings=${bearings}`;
+    type Osrm = { routes?: { legs: { steps: { geometry: { coordinates: [number, number][] } }[] }[] }[] };
+    let legs: [number, number][][];
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': UA() }, signal: AbortSignal.timeout(4000) });
+      if (res.status >= 500 || res.status === 429) throw new Error(`router returned ${res.status}`);
+      const r = res.ok ? ((await res.json()) as Osrm).routes?.[0] : undefined;
+      if (!r || r.legs.length !== cps.length - 1) return geometry;
+      legs = r.legs.map((l) => l.steps.flatMap((st) => st.geometry.coordinates));
+    } catch {
+      this.snapPausedUntil = Date.now() + 5 * 60 * 1000;
+      return geometry;
+    }
+    const out: [number, number][] = [];
+    legs.forEach((leg, k) => {
+      const raw = geometry.slice(cps[k].i, cps[k + 1].i + 1);
+      // Within 100 m of the start or destination there is slack: those can be on lanes the map doesn't have.
+      const ends = [geometry[0], geometry[geometry.length - 1]];
+      const slack = (p: [number, number]) => (ends.some((e) => haversine(p, e) < 100) ? 120 : 40);
+      const fits = leg.length >= 2 && raw.every((p) => distanceToLine(p, leg) <= slack(p)) && leg.every((p) => distanceToLine(p, raw) <= slack(p));
+      out.push(...(fits ? leg : raw));
+    });
+    return out;
+  }
+
   /**
    * Up to three ways to make a trip, fastest first, each labelled. TomTom (with live traffic) when a key is set;
    * otherwise the free router's alternatives. `minutes` is the trip right now; `usualMin` without traffic.
@@ -86,13 +163,13 @@ export class RoutingProvider {
       const url = `https://api.tomtom.com/routing/1/calculateRoute/${from[1]},${from[0]}:${to[1]},${to[0]}/json?key=${key}&traffic=true&travelMode=${mode}&routeType=fastest&maxAlternatives=2&computeTravelTimeFor=all&instructionsType=text&language=en-GB`;
       type Tt = { routes: { summary: { travelTimeInSeconds: number; noTrafficTravelTimeInSeconds?: number; lengthInMeters: number }; legs: { points: { latitude: number; longitude: number }[] }[]; guidance?: { instructions: { routeOffsetInMeters: number; street?: string }[] } }[] };
       const data = await getJson<Tt>(url).catch(() => null);
-      list = (data?.routes ?? []).map((r) => ({
-        geometry: r.legs.flatMap((l) => l.points.map((p) => [p.longitude, p.latitude] as [number, number])),
-        minutes: Math.round(r.summary.travelTimeInSeconds / 60),
-        usualMin: Math.round((r.summary.noTrafficTravelTimeInSeconds ?? r.summary.travelTimeInSeconds) / 60),
+      list = await Promise.all((data?.routes ?? []).map(async (r) => ({
+        geometry: await this.snapToMap(r.legs.flatMap((l) => l.points.map((p) => [p.longitude, p.latitude] as [number, number])), vehicle),
+        minutes: tripMinutes(vehicle, r.summary.travelTimeInSeconds, r.summary.lengthInMeters),
+        usualMin: tripMinutes(vehicle, r.summary.noTrafficTravelTimeInSeconds ?? r.summary.travelTimeInSeconds, r.summary.lengthInMeters),
         distanceKm: Math.round(r.summary.lengthInMeters / 100) / 10,
         via: mainRoad(r.guidance?.instructions ?? [], r.summary.lengthInMeters),
-      }));
+      })));
     }
     if (!list.length) {
       const v = VEHICLES[vehicle] ?? VEHICLES.car;
@@ -151,8 +228,8 @@ export class RoutingProvider {
     const r = ((await res.json()) as Tt).routes?.[0];
     if (!r) return null;
     return {
-      geometry: r.legs.flatMap((l) => l.points.map((p) => [p.longitude, p.latitude] as [number, number])),
-      minutes: Math.round(r.summary.travelTimeInSeconds / 60),
+      geometry: await this.snapToMap(r.legs.flatMap((l) => l.points.map((p) => [p.longitude, p.latitude] as [number, number])), vehicle),
+      minutes: tripMinutes(vehicle, r.summary.travelTimeInSeconds, r.summary.lengthInMeters),
       distanceKm: Math.round(r.summary.lengthInMeters / 100) / 10,
     };
   }

@@ -50,3 +50,29 @@ describe('splitSource', () => {
     expect(splitSource('Kochi - Metro update', 'The Hindu')).toEqual(['Kochi - Metro update', 'The Hindu']);
   });
 });
+
+import { checkpoints, tripMinutes } from '../providers/providers.js';
+
+describe('tripMinutes', () => {
+  it('times cycling from distance, not from car traffic', () => {
+    // TomTom's bicycle mode said 22 min for 7.1 km (car speed); at 15 km/h it is 28 min.
+    expect(tripMinutes('cycle', 22 * 60, 7100)).toBe(28);
+    expect(tripMinutes('car', 22 * 60, 7400)).toBe(22);
+  });
+});
+
+describe('checkpoints', () => {
+  it('spaces points along a path and always keeps both ends', () => {
+    const line: [number, number][] = Array.from({ length: 101 }, (_, i) => [76.2 + i * 0.0001, 9.9]); // ~1.1 km east
+    const cps = checkpoints(line, 250, 60);
+    expect(cps[0].i).toBe(0);
+    expect(cps.at(-1)!.i).toBe(100);
+    expect(cps.length).toBeGreaterThanOrEqual(4);
+    expect(cps.length).toBeLessThanOrEqual(6);
+    expect(cps[1].heading).toBe(90);
+  });
+  it('never returns more than the maximum', () => {
+    const line: [number, number][] = Array.from({ length: 2000 }, (_, i) => [76.2 + i * 0.001, 9.9]);
+    expect(checkpoints(line, 250, 60).length).toBeLessThanOrEqual(60);
+  });
+});
