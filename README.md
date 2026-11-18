@@ -57,6 +57,16 @@ $ npm run test:e2e
 $ npm run test:cov
 ```
 
+## Database
+
+Set `DATABASE_URL` to a PostgreSQL connection string (for example from [Neon](https://neon.tech)) and the API stores everything there, so accounts and data survive deploys and restarts. Tables are created on first start.
+
+Without `DATABASE_URL`, the API uses a local SQLite file (`data/buddy.sqlite`). That is fine for development, but on hosts like Render the file is wiped on every deploy, which signs everyone out.
+
+`DATABASE_SSL`: leave unset for hosted databases (TLS with certificate checks), `no-verify` for TLS without certificate checks, `off` for a database on the same machine.
+
+Environment variables used in production: `DATABASE_URL`, `JWT_SECRET`, `TOMTOM_KEY`, `GEOAPIFY_KEY`, `ANTHROPIC_API_KEY`, `MET_USER_AGENT`, `TZ_NAME`.
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.

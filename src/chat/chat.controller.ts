@@ -17,7 +17,8 @@ import { Repository } from 'typeorm';
 import { UserId } from '../common/auth.js';
 import { DEFAULT_SETTINGS, Reminder, SavedRoute, User, WaterLog } from '../common/entities.js';
 import { localParts, TtlCache, today } from '../common/util.js';
-import { WeatherProvider } from '../providers/providers.js';
+import { PlacesProvider, RoutingProvider, WeatherProvider } from '../providers/providers.js';
+import { Changed, chatTools } from './chat.tools.js';
 import { forToday } from '../reminders/reminders.controller.js';
 import { RouteStatusService } from '../routes/route-status.service.js';
 
@@ -43,7 +44,11 @@ Each conversation includes a snapshot of the user's data at the moment of the qu
 
 You can also answer everyday questions on any topic.
 
-You can't change anything in the app: you can't add reminders, log water or save routes. When the user asks for that, tell them where in the app to do it in one short sentence.
+You can make three changes for the user with your tools: log water (log_water), add a reminder to their schedule (add_reminder), and save a regular route (add_route). Use them when the user asks, or clearly says they did something, like "I just drank two glasses". Don't make changes they didn't ask for.
+- For a reminder, a title and a time are enough. If no day is given, use today; if that time has already passed today, ask whether they meant tomorrow.
+- For a route you need where they start, where they go, and when they leave. If any is missing or vague ("home", "office"), ask for the area or a landmark first. After saving, say which places were matched so they can check.
+- After a change, confirm it in one short sentence using the tool's result. If a tool returns an error, explain it simply and ask for what's missing.
+You can't delete or edit things; for that, point them to Routes or Reminders.
 
 Write for a phone screen: short, friendly answers, a few sentences or a short list. The app shows plain text, so don't use markdown: no ** for bold, no # headings, no tables. For a list, start each line with "- ". Reply in the language the user writes in; if they write in Malayalam, reply in Malayalam.`;
 
@@ -58,6 +63,8 @@ export class ChatController {
   constructor(
     private weather: WeatherProvider,
     private statusSvc: RouteStatusService,
+    private places: PlacesProvider,
+    private routing: RoutingProvider,
     @InjectRepository(User) private users: Repository<User>,
     @InjectRepository(SavedRoute) private routes: Repository<SavedRoute>,
     @InjectRepository(Reminder) private reminders: Repository<Reminder>,
@@ -65,9 +72,8 @@ export class ChatController {
   ) {}
 
   /** The user's data right now, as plain text for the model. Each part fails on its own. */
-  private async snapshot(userId: number): Promise<string> {
-    const user = await this.users.findOneBy({ id: userId });
-    if (!user) throw new NotFoundException();
+  private async snapshot(user: User): Promise<string> {
+    const userId = user.id;
     const settings = { ...DEFAULT_SETTINGS, ...user.settings };
     const now = localParts();
     const d = today();
@@ -114,7 +120,7 @@ export class ChatController {
 
   @Post()
   @HttpCode(200)
-  async chat(@UserId() userId: number, @Body() dto: ChatDto): Promise<{ reply: string }> {
+  async chat(@UserId() userId: number, @Body() dto: ChatDto): Promise<{ reply: string; changed: Changed[] }> {
     if (!this.client) throw new ServiceUnavailableException('The assistant is not set up on this server yet.');
 
     // The conversation must start and end with the user; keep the last 20 turns.
@@ -129,11 +135,20 @@ export class ChatController {
 
     const messages: Anthropic.Beta.BetaMessageParam[] = history.map((m) => ({ role: m.role, content: m.content }));
     // Fresh data for this question, as an operator message right after it.
-    messages.push({ role: 'system', content: `Snapshot of the user's data:\n${await this.snapshot(userId)}` });
+    const user = await this.users.findOneBy({ id: userId });
+    if (!user) throw new NotFoundException();
+    messages.push({ role: 'system', content: `Snapshot of the user's data:\n${await this.snapshot(user)}` });
+
+    const changed = new Set<Changed>();
+    const tools = chatTools({ user, water: this.water, reminders: this.reminders, routes: this.routes, places: this.places, routing: this.routing }, changed);
+    const result = (reply: string) => ({ reply, changed: [...changed] });
 
     try {
-      const response = await this.client.beta.messages.create({
+      // The SDK's tool runner calls the tools Claude picks and feeds the results back until Claude answers.
+      const response = await this.client.beta.messages.toolRunner({
         model: MODEL,
+        tools,
+        max_iterations: 6,
         max_tokens: 8000,
         betas: ['server-side-fallback-2026-07-01'],
         // If the model declines on a safety classifier, the API retries on a fallback model in the same call.
@@ -142,15 +157,20 @@ export class ChatController {
         system: SYSTEM,
         messages,
       });
-      if (response.stop_reason === 'refusal') return { reply: "Sorry, I can't help with that one." };
+      if (response.stop_reason === 'refusal') return result("Sorry, I can't help with that one.");
       const text = response.content
         .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text')
         .map((b) => b.text)
         .join('\n')
         .trim();
       if (response.stop_reason === 'max_tokens') this.log.warn('Reply hit max_tokens');
-      return { reply: text || "Sorry, I couldn't come up with an answer. Try asking another way." };
+      return result(text || (changed.size ? 'Done.' : "Sorry, I couldn't come up with an answer. Try asking another way."));
     } catch (e) {
+      // A change already made must still reach the app, so it refreshes.
+      if (changed.size) {
+        this.log.error(`Chat failed after a change: ${(e as Error).message}`);
+        return result('Done, though I couldn\'t finish my reply. Check the app to see the change.');
+      }
       if (e instanceof Anthropic.AuthenticationError) {
         // Log only the shape of the key, never the key itself.
         this.log.error(`ANTHROPIC_API_KEY was rejected (length ${this.apiKey.length}, starts with ${this.apiKey.slice(0, 7)}). Create a new key at console.anthropic.com.`);
