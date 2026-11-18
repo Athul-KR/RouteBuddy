@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import { Public, UserId } from '../common/auth.js';
 import { AppNotification, DEFAULT_SETTINGS, Reminder, SavedRoute, User, WaterLog } from '../common/entities.js';
 import { today } from '../common/util.js';
-import { NewsProvider, PlacesProvider, WeatherProvider } from '../providers/providers.js';
+import { NEWS_LANGS, NewsLang, NewsProvider, PlacesProvider, WeatherProvider } from '../providers/providers.js';
 import { QuotaService } from '../providers/quota.service.js';
 import { forToday } from '../reminders/reminders.controller.js';
 import { RouteStatusService } from '../routes/route-status.service.js';
@@ -41,9 +41,13 @@ export class InfoController {
     return this.weather.forecast(...coords(lat, lon));
   }
 
+  /** News for the user's city, in the language given or their saved one. */
   @Get('news')
-  getNews(@Query('topic') topic?: string) {
-    return this.news.list(topic);
+  async getNews(@UserId() userId: number, @Query('topic') topic?: string, @Query('lang') lang?: string) {
+    const user = await this.users.findOneBy({ id: userId });
+    const saved = { ...DEFAULT_SETTINGS, ...user?.settings }.newsLang;
+    const l = NEWS_LANGS.includes(lang as NewsLang) ? (lang as NewsLang) : saved;
+    return this.news.list(topic, l, user?.city);
   }
 
   @Get('places/search')
@@ -68,7 +72,7 @@ export class InfoController {
 
     const [weather, headlines, status] = await Promise.all([
       this.weather.forecast(user.lat, user.lon).catch(() => null),
-      this.news.list().then((n) => n.slice(0, 3)).catch(() => []),
+      this.news.list(undefined, { ...DEFAULT_SETTINGS, ...user.settings }.newsLang, user.city).then((n) => n.slice(0, 3)).catch(() => []),
       next ? this.statusSvc.status(next.route).catch(() => null) : Promise.resolve(null),
     ]);
 

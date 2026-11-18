@@ -39,3 +39,14 @@ describe('mainRoad', () => {
     expect(mainRoad([], 4000)).toBeUndefined();
   });
 });
+
+import { splitSource } from '../providers/providers.js';
+
+describe('splitSource', () => {
+  it('splits a Google News headline into title and publisher', () => {
+    expect(splitSource('മഴ ശക്തമാകും - Manorama Online')).toEqual(['മഴ ശക്തമാകും', 'Manorama Online']);
+  });
+  it('keeps the title whole when the feed names its source', () => {
+    expect(splitSource('Kochi - Metro update', 'The Hindu')).toEqual(['Kochi - Metro update', 'The Hindu']);
+  });
+});

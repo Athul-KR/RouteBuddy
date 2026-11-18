@@ -16,6 +16,8 @@ export interface UserSettings {
   wakeEnd: string;
   walkReminder: boolean;
   waterOn: boolean;
+  /** News language: 'ml' Malayalam or 'en' English. */
+  newsLang: 'en' | 'ml';
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
@@ -32,6 +34,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   wakeEnd: '21:00',
   walkReminder: false,
   waterOn: true,
+  newsLang: 'ml',
 };
 
 @Entity()

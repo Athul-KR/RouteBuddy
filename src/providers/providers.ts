@@ -274,50 +274,102 @@ export class WeatherProvider {
 
 export interface NewsItem { title: string; link: string; source: string; topic: string; published: string }
 
+export type NewsLang = 'en' | 'ml';
+export const NEWS_LANGS: NewsLang[] = ['en', 'ml'];
+export const NEWS_TOPICS = ['Local', 'Kerala', 'India', 'World', 'Tech'];
+
+interface Feed { topic: string; source?: string; url: string }
+
+/** Google News feeds; titles end in " - Publisher". hl/gl/ceid pick the language edition. */
+const gn = (lang: NewsLang, path: string) => {
+  const ed = lang === 'ml' ? 'hl=ml&gl=IN&ceid=IN:ml' : 'hl=en-IN&gl=IN&ceid=IN:en';
+  return `https://news.google.com/rss/${path}${path.includes('?') ? '&' : '?'}${ed}`;
+};
+const gnSearch = (lang: NewsLang, q: string) => gn(lang, `search?q=${encodeURIComponent(q)}`);
+const gnTopic = (lang: NewsLang, t: string) => gn(lang, `headlines/section/topic/${t}`);
+
 /** Pick 5–10 publishers whose RSS terms allow this use before launch (see the plan). */
-const FEEDS: { topic: string; source: string; url: string }[] = [
-  { topic: 'Local', source: 'The Hindu', url: 'https://www.thehindu.com/news/national/kerala/feeder/default.rss' },
-  { topic: 'India', source: 'The Hindu', url: 'https://www.thehindu.com/news/national/feeder/default.rss' },
-  { topic: 'World', source: 'The Hindu', url: 'https://www.thehindu.com/news/international/feeder/default.rss' },
-  { topic: 'Tech', source: 'The Hindu', url: 'https://www.thehindu.com/sci-tech/technology/feeder/default.rss' },
-];
+function feedsFor(lang: NewsLang, city: string): Feed[] {
+  if (lang === 'ml') {
+    return [
+      { topic: 'Local', url: gnSearch('ml', `${city} when:2d`) },
+      { topic: 'Kerala', url: gnSearch('ml', 'കേരളം when:1d') },
+      { topic: 'India', url: gnTopic('ml', 'NATION') },
+      { topic: 'World', url: gnTopic('ml', 'WORLD') },
+      { topic: 'Tech', url: gnTopic('ml', 'TECHNOLOGY') },
+    ];
+  }
+  return [
+    { topic: 'Local', url: gnSearch('en', `${city} Kerala when:2d`) },
+    { topic: 'Kerala', source: 'The Hindu', url: 'https://www.thehindu.com/news/national/kerala/feeder/default.rss' },
+    { topic: 'India', source: 'The Hindu', url: 'https://www.thehindu.com/news/national/feeder/default.rss' },
+    { topic: 'World', source: 'The Hindu', url: 'https://www.thehindu.com/news/international/feeder/default.rss' },
+    { topic: 'Tech', source: 'The Hindu', url: 'https://www.thehindu.com/sci-tech/technology/feeder/default.rss' },
+  ];
+}
+
+/** "Headline - Publisher" -> ["Headline", "Publisher"]. */
+export function splitSource(title: string, fallback?: string): [string, string] {
+  const i = title.lastIndexOf(' - ');
+  if (fallback || i < 0) return [title.trim(), fallback ?? 'News'];
+  return [title.slice(0, i).trim(), title.slice(i + 3).trim()];
+}
 
 @Injectable()
 export class NewsProvider {
   private log = new Logger('News');
   private parser = new Parser({ timeout: 12000, headers: { 'User-Agent': 'EverydayBuddy/0.1' } });
-  private items: NewsItem[] = [];
-  private fetchedAt = 0;
+  private cache = new TtlCache<NewsItem[]>();
+  private pending = new Map<string, Promise<NewsItem[]>>();
 
-  /** Refreshes at most every 30 minutes; deduplicates by link. */
-  async list(topic?: string): Promise<NewsItem[]> {
-    if (Date.now() - this.fetchedAt > 30 * 60 * 1000) await this.refresh();
-    const all = topic && topic !== 'all' ? this.items.filter((i) => i.topic === topic) : this.items;
-    return all.slice(0, 40);
+  /** Per language and city; refreshes at most every 30 minutes; deduplicates by link and headline. */
+  async list(topic?: string, lang: NewsLang = 'en', city = 'Kochi'): Promise<NewsItem[]> {
+    city = city.replace(/[^\p{L}\p{N} .-]/gu, '').slice(0, 40).trim() || 'Kochi';
+    const key = `${lang}|${city.toLowerCase()}`;
+    let items = this.cache.get(key);
+    if (!items) {
+      let p = this.pending.get(key);
+      if (!p) {
+        p = this.fetch(lang, city).finally(() => this.pending.delete(key));
+        this.pending.set(key, p);
+      }
+      items = await p;
+      if (items.length) this.cache.set(key, items, 30 * 60 * 1000);
+    }
+    if (topic && topic !== 'all') return items.filter((i) => i.topic === topic).slice(0, 40);
+    // "For you": take turns across topics, closest to home first, so local stories lead.
+    const groups = NEWS_TOPICS.map((t) => items.filter((i) => i.topic === t));
+    const mixed: NewsItem[] = [];
+    for (let r = 0; mixed.length < 40 && groups.some((g) => g.length > r); r++) for (const g of groups) if (g[r]) mixed.push(g[r]);
+    return mixed.slice(0, 40);
   }
 
-  async refresh() {
+  private async fetch(lang: NewsLang, city: string): Promise<NewsItem[]> {
     const seen = new Set<string>();
     const out: NewsItem[] = [];
-    await Promise.all(
-      FEEDS.map(async (f) => {
+    const results = await Promise.all(
+      feedsFor(lang, city).map(async (f) => {
         try {
-          const feed = await this.parser.parseURL(f.url);
-          for (const it of feed.items.slice(0, 20)) {
-            if (!it.link || !it.title || seen.has(it.link)) continue;
-            seen.add(it.link);
-            out.push({ title: it.title.trim(), link: it.link, source: f.source, topic: f.topic, published: it.isoDate ?? new Date().toISOString() });
-          }
+          return { f, items: (await this.parser.parseURL(f.url)).items.slice(0, 20) };
         } catch (e) {
           this.log.warn(`Feed failed: ${f.url} (${(e as Error).message})`);
+          return { f, items: [] };
         }
       }),
     );
-    if (out.length) {
-      const weekAgo = Date.now() - 7 * 864e5;
-      this.items = out.filter((i) => Date.parse(i.published) > weekAgo).sort((a, b) => b.published.localeCompare(a.published));
-      this.fetchedAt = Date.now();
+    for (const { f, items } of results) {
+      for (const it of items) {
+        if (!it.link || !it.title) continue;
+        const [title, source] = splitSource(it.title, f.source);
+        const k = title.toLowerCase();
+        if (seen.has(it.link) || seen.has(k)) continue;
+        seen.add(it.link);
+        seen.add(k);
+        out.push({ title, link: it.link, source, topic: f.topic, published: it.isoDate ?? new Date().toISOString() });
+      }
     }
+    const weekAgo = Date.now() - 7 * 864e5;
+    return out.filter((i) => Date.parse(i.published) > weekAgo).sort((a, b) => b.published.localeCompare(a.published));
   }
 }
 
