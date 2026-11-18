@@ -50,7 +50,9 @@ Write for a phone screen: short, friendly answers, a few sentences or a short li
 @Controller('v1/chat')
 export class ChatController {
   private log = new Logger('Chat');
-  private client = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
+  // Pasted keys often pick up quotes, spaces or a line break; those make the API reject an otherwise good key.
+  private apiKey = (process.env.ANTHROPIC_API_KEY ?? '').trim().replace(/^["']|["']$/g, '').trim();
+  private client = this.apiKey ? new Anthropic({ apiKey: this.apiKey }) : null;
   private usage = new TtlCache<number>();
 
   constructor(
@@ -150,7 +152,8 @@ export class ChatController {
       return { reply: text || "Sorry, I couldn't come up with an answer. Try asking another way." };
     } catch (e) {
       if (e instanceof Anthropic.AuthenticationError) {
-        this.log.error('ANTHROPIC_API_KEY was rejected');
+        // Log only the shape of the key, never the key itself.
+        this.log.error(`ANTHROPIC_API_KEY was rejected (length ${this.apiKey.length}, starts with ${this.apiKey.slice(0, 7)}). Create a new key at console.anthropic.com.`);
         throw new ServiceUnavailableException('The assistant is not set up correctly on this server.');
       }
       if (e instanceof Anthropic.RateLimitError) throw new HttpException('The assistant is busy. Try again in a minute.', HttpStatus.TOO_MANY_REQUESTS);
