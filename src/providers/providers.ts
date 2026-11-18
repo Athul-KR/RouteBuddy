@@ -487,17 +487,43 @@ export interface Place { name: string; detail: string; lat: number; lon: number 
 
 @Injectable()
 export class PlacesProvider {
-  async search(q: string, lat: number, lon: number): Promise<Place[]> {
-    const key = process.env.GEOAPIFY_KEY;
-    if (key) {
-      const data = await getJson<{ features: { properties: { name?: string; formatted: string; address_line2?: string; lat: number; lon: number } }[] }>(
-        `https://api.geoapify.com/v1/geocode/autocomplete?text=${encodeURIComponent(q)}&bias=proximity:${lon},${lat}&limit=6&apiKey=${key}`,
+  private countries = new TtlCache<string>();
+  private results = new TtlCache<Place[]>();
+
+  /** The country code ("in") at a point, cached per ~100 km square. Empty when unknown. */
+  private async countryAt(lat: number, lon: number, key: string): Promise<string> {
+    const ck = `${Math.round(lat)},${Math.round(lon)}`;
+    const hit = this.countries.get(ck);
+    if (hit !== undefined) return hit;
+    try {
+      const data = await getJson<{ features: { properties: { country_code?: string } }[] }>(
+        `https://api.geoapify.com/v1/geocode/reverse?lat=${lat}&lon=${lon}&apiKey=${key}`,
       );
-      return data.features.map(({ properties: p }) => ({ name: p.name ?? p.formatted, detail: p.address_line2 ?? p.formatted, lat: p.lat, lon: p.lon }));
+      const cc = data.features[0]?.properties.country_code ?? '';
+      this.countries.set(ck, cc, 30 * 864e5);
+      return cc;
+    } catch {
+      return '';
     }
-    // Free fallback: Photon (OpenStreetMap data), no key needed. Fine for a demo, not for production traffic.
+  }
+
+  /**
+   * Suggestions closest to home first: places within about 100 km, then the rest of the user's country,
+   * then the rest of the world only when those don't give enough.
+   */
+  async search(q: string, lat: number, lon: number): Promise<Place[]> {
+    const ck = `${q.toLowerCase()}|${lat.toFixed(1)}|${lon.toFixed(1)}`;
+    const cached = this.results.get(ck);
+    if (cached) return cached;
+    const out = await this.lookup(q, lat, lon);
+    this.results.set(ck, out, 10 * 60 * 1000);
+    return out;
+  }
+
+  /** Photon (OpenStreetMap, free, no key) results with their country, biased to the user. */
+  private async photon(q: string, lat: number, lon: number): Promise<(Place & { cc: string })[]> {
     const data = await getJson<{ features: { geometry: { coordinates: [number, number] }; properties: Record<string, string> }[] }>(
-      `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${lat}&lon=${lon}&limit=6`,
+      `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${lat}&lon=${lon}&limit=10`,
     );
     return data.features.map((f) => {
       const p = f.properties;
@@ -506,8 +532,48 @@ export class PlacesProvider {
         detail: [p.street, p.district ?? p.locality, p.city, p.state].filter(Boolean).join(', '),
         lat: f.geometry.coordinates[1],
         lon: f.geometry.coordinates[0],
+        cc: (p.countrycode ?? '').toLowerCase(),
       };
     });
+  }
+
+  private async lookup(q: string, lat: number, lon: number): Promise<Place[]> {
+    const key = process.env.GEOAPIFY_KEY;
+    const here: [number, number] = [lon, lat];
+    const isNear = (p: Place) => haversine([p.lon, p.lat], here) <= 100_000;
+    type Ga = { features: { properties: { name?: string; formatted: string; address_line2?: string; lat: number; lon: number } }[] };
+    const ask = (filter: string, limit: number): Promise<Place[]> =>
+      key
+        ? getJson<Ga>(`https://api.geoapify.com/v1/geocode/autocomplete?text=${encodeURIComponent(q)}${filter}&bias=proximity:${lon},${lat}&limit=${limit}&apiKey=${key}`)
+            .then((d) => d.features.map(({ properties: p }) => ({ name: p.name ?? p.formatted, detail: p.address_line2 ?? p.formatted, lat: p.lat, lon: p.lon })))
+            .catch(() => [])
+        : Promise.resolve([]);
+
+    const ccPromise = key
+      ? this.countryAt(lat, lon, key)
+      : getJson<{ features: { properties: Record<string, string> }[] }>(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}`)
+          .then((d) => (d.features[0]?.properties.countrycode ?? '').toLowerCase()).catch(() => '');
+    // Everything that doesn't need the country starts at once.
+    const osmP = this.photon(q, lat, lon).catch(() => []);
+    const nearP = ask(`&filter=circle:${lon},${lat},100000`, 5);
+    const cc = await ccPromise;
+    const [osm, gNear, gCountry] = await Promise.all([osmP, nearP, cc ? ask(`&filter=countrycode:${cc}`, 5) : Promise.resolve([])]);
+
+    // Tiers: near (within ~100 km), the rest of the country, then the world.
+    // Within a tier the two sources take turns, so each one's best match shows near the top.
+    const zip = (a: Place[], b: Place[]) => Array.from({ length: Math.max(a.length, b.length) }, (_, i) => [a[i], b[i]]).flat().filter((p): p is Place => !!p);
+    const near = zip(gNear, osm.filter(isNear));
+    const country = zip(gCountry, osm.filter((p) => !isNear(p) && p.cc === cc));
+    let world = osm.filter((p) => !isNear(p) && p.cc !== cc) as Place[];
+    if (near.length + country.length < 4 && key) world = [...(await ask('', 5)), ...world];
+
+    // One entry per place: the same name within 300 m counts once.
+    const out: Place[] = [];
+    for (const p of [...near, ...country, ...world]) {
+      const dup = out.some((o) => o.name.toLowerCase() === p.name.toLowerCase() && haversine([o.lon, o.lat], [p.lon, p.lat]) < 300);
+      if (!dup) out.push({ name: p.name, detail: p.detail, lat: p.lat, lon: p.lon });
+    }
+    return out.slice(0, 8);
   }
 
   async reverse(lat: number, lon: number): Promise<string> {
