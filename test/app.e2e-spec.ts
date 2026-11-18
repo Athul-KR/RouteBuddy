@@ -99,5 +99,21 @@ describe('Everyday Buddy API (e2e)', () => {
     expect(exp.body.waterLogs).toHaveLength(1);
     await request(app.getHttpServer()).delete('/v1/me').set(auth()).expect(204);
     await request(app.getHttpServer()).post('/v1/auth/login').send({ email: 'test@example.com', password: 'secret123' }).expect(401);
+    // The deleted account's token is refused (401, so the app signs in again), not "Not Found".
+    await request(app.getHttpServer()).get('/v1/dashboard').set(auth()).expect(401);
+  });
+
+  it('refuses a token for an account that no longer matches its id (database reset)', async () => {
+    const reg = await request(app.getHttpServer())
+      .post('/v1/auth/register').send({ name: 'New', email: 'new@example.com', password: 'secret123' }).expect(201);
+    const { JwtService } = await import('@nestjs/jwt');
+    const jwt = app.get(JwtService);
+    const { sub } = jwt.decode(reg.body.accessToken) as { sub: number };
+    // Same id, but issued for an account created at another time; old tokens without the claim too.
+    const forged = await jwt.signAsync({ sub, typ: 'access', ca: 1 });
+    const legacy = await jwt.signAsync({ sub, typ: 'access' });
+    await request(app.getHttpServer()).get('/v1/dashboard').set({ authorization: `Bearer ${forged}` }).expect(401);
+    await request(app.getHttpServer()).get('/v1/dashboard').set({ authorization: `Bearer ${legacy}` }).expect(401);
+    await request(app.getHttpServer()).get('/v1/dashboard').set({ authorization: `Bearer ${reg.body.accessToken}` }).expect(200);
   });
 });
