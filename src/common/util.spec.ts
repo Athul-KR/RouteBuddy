@@ -25,3 +25,17 @@ describe('util', () => {
     expect(distanceToLine([76.285, 9.94], line)).toBeGreaterThan(1000); // ~1.1 km away
   });
 });
+
+describe('mainRoad', () => {
+  it('picks the street a route spends most distance on', async () => {
+    const { mainRoad } = await import('../providers/providers.js');
+    const ins = [
+      { routeOffsetInMeters: 0, street: 'Start Lane' },
+      { routeOffsetInMeters: 100, street: 'Thenmala Road' },
+      { routeOffsetInMeters: 2200, street: 'Gokul Road' },
+      { routeOffsetInMeters: 2500, street: 'M C Road' },
+    ];
+    expect(mainRoad(ins, 4000)).toBe('Thenmala Road');
+    expect(mainRoad([], 4000)).toBeUndefined();
+  });
+});

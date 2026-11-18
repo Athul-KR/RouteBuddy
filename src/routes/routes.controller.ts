@@ -1,11 +1,11 @@
-import { Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post, Put } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post, Put, Query } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { ArrayMaxSize, IsArray, IsIn, IsInt, IsNumber, IsOptional, IsString, Matches, Max, Min } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, Matches, Max, Min } from 'class-validator';
 import { Repository } from 'typeorm';
 import { UserId } from '../common/auth.js';
 import { SavedRoute, type Vehicle } from '../common/entities.js';
 import { defined } from '../common/util.js';
-import { RoutingProvider } from '../providers/providers.js';
+import { ALONG_KINDS, AlongRouteProvider, type AlongKind, RoutingProvider } from '../providers/providers.js';
 import { RouteStatusService } from './route-status.service.js';
 
 const VEH = ['car', 'bike2', 'cycle', 'walk'];
@@ -22,6 +22,22 @@ class CreateRouteDto {
   @IsArray() @ArrayMaxSize(7) @IsInt({ each: true }) days: number[];
   @Matches(/^\d{2}:\d{2}$/) departTime: string;
   @IsOptional() @IsInt() @Min(1) @Max(120) thresholdMin?: number;
+  /** The option the user picked in the preview. Without it, the server plans the route itself. */
+  @IsOptional() @IsArray() @ArrayMinSize(2) @ArrayMaxSize(20000) geometry?: [number, number][];
+  @IsOptional() @IsNumber() @Min(0) @Max(1440) usualMin?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(5000) distanceKm?: number;
+}
+
+/** A picked path must be [lon, lat] pairs that start and end near the chosen places (within ~1 km). */
+function validPath(d: CreateRouteDto): [number, number][] | null {
+  const g = d.geometry;
+  if (!g) return null;
+  const ok = g.every((p) => Array.isArray(p) && p.length === 2 && p.every((n) => Number.isFinite(n)) && Math.abs(p[0]) <= 180 && Math.abs(p[1]) <= 90);
+  const near = (p: [number, number], lon: number, lat: number) => Math.abs(p[0] - lon) < 0.01 && Math.abs(p[1] - lat) < 0.01;
+  if (!ok || !near(g[0], d.fromLon, d.fromLat) || !near(g[g.length - 1], d.toLon, d.toLat)) {
+    throw new BadRequestException('The chosen route does not match the start and destination');
+  }
+  return g;
 }
 
 class UpdateRouteDto {
@@ -33,6 +49,10 @@ class UpdateRouteDto {
 class ScheduleDto {
   @IsArray() @ArrayMaxSize(7) @IsInt({ each: true }) days: number[];
   @Matches(/^\d{2}:\d{2}$/) departTime: string;
+}
+
+class SimulateDto {
+  @IsBoolean() on: boolean;
 }
 
 class PreviewDto {
@@ -49,6 +69,7 @@ export class RoutesController {
     @InjectRepository(SavedRoute) private routes: Repository<SavedRoute>,
     private routing: RoutingProvider,
     private statusSvc: RouteStatusService,
+    private along: AlongRouteProvider,
   ) {}
 
   private async own(userId: number, id: number) {
@@ -63,20 +84,23 @@ export class RoutesController {
     return Promise.all(list.map(async (r) => ({ ...r, status: await this.statusSvc.status(r) })));
   }
 
-  /** Path and time for a draft route, before saving. */
+  /** Up to three route options for a draft route, fastest first, before saving. */
   @Post('preview')
   @HttpCode(200)
-  preview(@Body() d: PreviewDto) {
-    return this.routing.route([d.fromLon, d.fromLat], [d.toLon, d.toLat], d.vehicle ?? 'car');
+  async preview(@Body() d: PreviewDto) {
+    return { options: await this.routing.options([d.fromLon, d.fromLat], [d.toLon, d.toLat], d.vehicle ?? 'car') };
   }
 
   @Post()
   async create(@UserId() userId: number, @Body() d: CreateRouteDto) {
     const vehicle = d.vehicle ?? 'car';
-    const path = await this.routing.route([d.fromLon, d.fromLat], [d.toLon, d.toLat], vehicle);
+    const picked = validPath(d);
+    const path = picked && d.usualMin !== undefined && d.distanceKm !== undefined
+      ? { geometry: picked, minutes: Math.round(d.usualMin), distanceKm: d.distanceKm }
+      : await this.routing.route([d.fromLon, d.fromLat], [d.toLon, d.toLat], vehicle);
     const r = await this.routes.save(
       this.routes.create({
-        ...d, userId, vehicle, name: d.name || `${d.fromName} → ${d.toName}`, thresholdMin: d.thresholdMin ?? 10,
+        ...defined(d), userId, vehicle, name: d.name || `${d.fromName} → ${d.toName}`, thresholdMin: d.thresholdMin ?? 10,
         geometry: path.geometry, usualMin: path.minutes, distanceKm: path.distanceKm,
       }),
     );
@@ -106,6 +130,27 @@ export class RoutesController {
     const r = await this.own(userId, id);
     Object.assign(r, defined(d));
     return this.routes.save(r);
+  }
+
+  /** Test switch: fakes a closure on this route. 404 unless ALLOW_SIMULATION=true. */
+  @Post(':id/simulate-closure')
+  @HttpCode(200)
+  async simulate(@UserId() userId: number, @Param('id', ParseIntPipe) id: number, @Body() d: SimulateDto) {
+    if (!RouteStatusService.simulationAllowed) throw new NotFoundException();
+    const r = await this.own(userId, id);
+    this.statusSvc.simulateClosure(r.id, d.on);
+    return this.statusSvc.status(r, true);
+  }
+
+  /** Petrol pumps, food, hotels, ATMs or EV chargers along the route you would drive now (the bypass, if there is one). */
+  @Get(':id/places')
+  async places(@UserId() userId: number, @Param('id', ParseIntPipe) id: number, @Query('kind') kind?: string) {
+    if (!kind || !(kind in ALONG_KINDS)) throw new BadRequestException(`kind must be one of: ${Object.keys(ALONG_KINDS).join(', ')}`);
+    const r = await this.own(userId, id);
+    const st = await this.statusSvc.status(r);
+    const geometry = st.bypass?.geometry ?? r.geometry;
+    const places = await this.along.search(`${r.id}:${st.bypass ? 'bypass' : 'route'}:${r.vehicle}`, geometry, kind as AlongKind);
+    return { kind, onBypass: !!st.bypass, places };
   }
 
   @Get(':id/status')

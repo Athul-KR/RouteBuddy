@@ -7,6 +7,7 @@ import { Injectable, Logger } from '@nestjs/common';
 const LIMITS: Record<string, number> = {
   get 'tomtom-incidents'() { return Number(process.env.TOMTOM_INCIDENT_LIMIT ?? 2500); },
   get 'tomtom-routing'() { return Number(process.env.TOMTOM_ROUTING_LIMIT ?? 20000); },
+  get 'tomtom-search'() { return Number(process.env.TOMTOM_SEARCH_LIMIT ?? 2500); },
 };
 
 @Injectable()

@@ -73,6 +73,19 @@ describe('Everyday Buddy API (e2e)', () => {
     await request(app.getHttpServer()).delete(`/v1/reminders/${r.body.id}`).set(auth()).expect(204);
   });
 
+  it('saves the route option the user picked, and rejects one that does not match the places', async () => {
+    const base = { fromName: 'A', fromLat: 8.5466, fromLon: 76.9426, toName: 'B', toLat: 8.5052, toLon: 76.96, days: [1], departTime: '08:30' };
+    const picked = [[76.9426, 8.5466], [76.95, 8.53], [76.96, 8.5052]];
+    const r = await request(app.getHttpServer()).post('/v1/routes').set(auth())
+      .send({ ...base, geometry: picked, usualMin: 18, distanceKm: 7.4 }).expect(201);
+    expect(r.body).toMatchObject({ geometry: picked, usualMin: 18, distanceKm: 7.4 });
+    await request(app.getHttpServer()).post('/v1/routes').set(auth())
+      .send({ ...base, geometry: [[70, 10], [71, 11]], usualMin: 5, distanceKm: 1 }).expect(400);
+    await request(app.getHttpServer()).get(`/v1/routes/${r.body.id}/places?kind=casino`).set(auth()).expect(400);
+    await request(app.getHttpServer()).get(`/v1/routes/999999/places?kind=petrol`).set(auth()).expect(404);
+    await request(app.getHttpServer()).delete(`/v1/routes/${r.body.id}`).set(auth()).expect(204);
+  });
+
   it('logs and undoes water', async () => {
     await request(app.getHttpServer()).post('/v1/water-logs').set(auth()).expect(201);
     const two = await request(app.getHttpServer()).post('/v1/water-logs').set(auth()).expect(201);

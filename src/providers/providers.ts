@@ -33,6 +33,24 @@ export interface RouteResult {
   distanceKm: number;
 }
 
+export interface RouteOption extends RouteResult {
+  usualMin: number;
+  label: string;
+  /** The road this option spends longest on, e.g. "Thenmala Road". */
+  via?: string;
+}
+
+/** The street a route spends the most distance on, from TomTom's turn-by-turn instructions. */
+export function mainRoad(instructions: { routeOffsetInMeters: number; street?: string }[], totalMetres: number): string | undefined {
+  const byStreet = new Map<string, number>();
+  instructions.forEach((ins, i) => {
+    if (!ins.street) return;
+    const next = instructions[i + 1]?.routeOffsetInMeters ?? totalMetres;
+    byStreet.set(ins.street, (byStreet.get(ins.street) ?? 0) + Math.max(0, next - ins.routeOffsetInMeters));
+  });
+  return [...byStreet.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+}
+
 export interface LiveRoute {
   minutes: number;
   delayMin: number;
@@ -56,6 +74,47 @@ export class RoutingProvider {
     };
   }
 
+  /**
+   * Up to three ways to make a trip, fastest first, each labelled. TomTom (with live traffic) when a key is set;
+   * otherwise the free router's alternatives. `minutes` is the trip right now; `usualMin` without traffic.
+   */
+  async options(from: [number, number], to: [number, number], vehicle: Vehicle): Promise<RouteOption[]> {
+    const key = process.env.TOMTOM_KEY;
+    let list: (RouteResult & { usualMin: number; via?: string })[] = [];
+    if (key && this.quota.take('tomtom-routing')) {
+      const mode = BYPASS_MODE[vehicle] ?? 'car';
+      const url = `https://api.tomtom.com/routing/1/calculateRoute/${from[1]},${from[0]}:${to[1]},${to[0]}/json?key=${key}&traffic=true&travelMode=${mode}&routeType=fastest&maxAlternatives=2&computeTravelTimeFor=all&instructionsType=text&language=en-GB`;
+      type Tt = { routes: { summary: { travelTimeInSeconds: number; noTrafficTravelTimeInSeconds?: number; lengthInMeters: number }; legs: { points: { latitude: number; longitude: number }[] }[]; guidance?: { instructions: { routeOffsetInMeters: number; street?: string }[] } }[] };
+      const data = await getJson<Tt>(url).catch(() => null);
+      list = (data?.routes ?? []).map((r) => ({
+        geometry: r.legs.flatMap((l) => l.points.map((p) => [p.longitude, p.latitude] as [number, number])),
+        minutes: Math.round(r.summary.travelTimeInSeconds / 60),
+        usualMin: Math.round((r.summary.noTrafficTravelTimeInSeconds ?? r.summary.travelTimeInSeconds) / 60),
+        distanceKm: Math.round(r.summary.lengthInMeters / 100) / 10,
+        via: mainRoad(r.guidance?.instructions ?? [], r.summary.lengthInMeters),
+      }));
+    }
+    if (!list.length) {
+      const v = VEHICLES[vehicle] ?? VEHICLES.car;
+      const url = `https://routing.openstreetmap.de/${v.profile}/route/v1/driving/${from[0]},${from[1]};${to[0]},${to[1]}?overview=full&geometries=geojson&alternatives=3`;
+      const data = await getJson<{ routes: { geometry: { coordinates: [number, number][] }; duration: number; distance: number }[] }>(url);
+      list = (data.routes ?? []).map((r) => {
+        const minutes = Math.round((r.duration / 60) * v.factor);
+        return { geometry: r.geometry.coordinates, minutes, usualMin: minutes, distanceKm: Math.round(r.distance / 100) / 10 };
+      });
+    }
+    if (!list.length) throw new ServiceUnavailableException('No route found between these places');
+
+    // Drop near-duplicates (same length within 1%), sort fastest first, then label.
+    const unique = list.filter((r, i) => list.findIndex((o) => Math.abs(o.distanceKm - r.distanceKm) <= r.distanceKm * 0.01) === i);
+    unique.sort((a, b) => a.minutes - b.minutes || a.distanceKm - b.distanceKm);
+    const shortest = Math.min(...unique.map((r) => r.distanceKm));
+    return unique.slice(0, 3).map((r, i) => ({
+      ...r,
+      label: i === 0 ? 'Fastest' : r.distanceKm === shortest ? 'Shortest' : `Option ${i + 1}`,
+    }));
+  }
+
   /** Travel time right now, with traffic, from TomTom. Returns null when there is no key or quota. */
   async live(from: [number, number], to: [number, number], vehicle: Vehicle): Promise<LiveRoute | null> {
     const key = process.env.TOMTOM_KEY;
@@ -66,7 +125,41 @@ export class RoutingProvider {
     const s = data.routes[0].summary;
     return { minutes: Math.round(s.travelTimeInSeconds / 60), delayMin: Math.round(s.trafficDelayInSeconds / 60), live: true };
   }
+
+  /**
+   * A route around blocked spots: TomTom, live traffic on, with a small box (about 130 m each way)
+   * avoided around each point. Returns null when there is no key, no quota, or no route.
+   */
+  async bypass(from: [number, number], to: [number, number], vehicle: Vehicle, avoid: [number, number][]): Promise<RouteResult | null> {
+    const key = process.env.TOMTOM_KEY;
+    const mode = BYPASS_MODE[vehicle] ?? 'car';
+    if (!key || !avoid.length || !this.quota.take('tomtom-routing')) return null;
+    const d = 0.0012;
+    const rectangles = avoid.slice(0, 10).map(([lon, lat]) => ({
+      southWestCorner: { latitude: lat - d, longitude: lon - d },
+      northEastCorner: { latitude: lat + d, longitude: lon + d },
+    }));
+    const url = `https://api.tomtom.com/routing/1/calculateRoute/${from[1]},${from[0]}:${to[1]},${to[0]}/json?key=${key}&traffic=true&travelMode=${mode}&routeType=fastest`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'User-Agent': UA() },
+      body: JSON.stringify({ avoidAreas: { rectangles } }),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!res.ok) return null;
+    type Tt = { routes?: { summary: { travelTimeInSeconds: number; lengthInMeters: number }; legs: { points: { latitude: number; longitude: number }[] }[] }[] };
+    const r = ((await res.json()) as Tt).routes?.[0];
+    if (!r) return null;
+    return {
+      geometry: r.legs.flatMap((l) => l.points.map((p) => [p.longitude, p.latitude] as [number, number])),
+      minutes: Math.round(r.summary.travelTimeInSeconds / 60),
+      distanceKm: Math.round(r.summary.lengthInMeters / 100) / 10,
+    };
+  }
 }
+
+/** TomTom travel modes for finding a way around a closure (every vehicle can be blocked). */
+const BYPASS_MODE: Record<Vehicle, string> = { car: 'car', bike2: 'motorcycle', cycle: 'bicycle', walk: 'pedestrian' };
 
 // ---------- Traffic incidents ----------
 
@@ -268,4 +361,70 @@ export class PlacesProvider {
   }
 }
 
-export const PROVIDERS = [QuotaService, RoutingProvider, TrafficProvider, WeatherProvider, NewsProvider, PlacesProvider];
+// ---------- Places along a route ----------
+
+/** What the "Along the way" chips search for, as TomTom POI categories. */
+export const ALONG_KINDS = {
+  petrol: { categories: '7311', query: 'petrol station' },
+  food: { categories: '7315', query: 'restaurant' },
+  hotels: { categories: '7314', query: 'hotel' },
+  atm: { categories: '7397', query: 'atm' },
+  ev: { categories: '7309', query: 'ev charging' },
+} as const;
+export type AlongKind = keyof typeof ALONG_KINDS;
+
+export interface AlongPlace {
+  name: string;
+  lat: number;
+  lon: number;
+  /** Extra minutes to stop here and rejoin the route. */
+  detourMin: number;
+  address: string;
+}
+
+@Injectable()
+export class AlongRouteProvider {
+  private cache = new TtlCache<AlongPlace[]>();
+  constructor(private quota: QuotaService) {}
+
+  get enabled() {
+    return !!process.env.TOMTOM_KEY;
+  }
+
+  /** Places of one kind within a 10-minute detour of the route, smallest detour first. Cached 15 minutes. */
+  async search(cacheKey: string, geometry: [number, number][], kind: AlongKind): Promise<AlongPlace[]> {
+    const key = process.env.TOMTOM_KEY;
+    if (!key) throw new ServiceUnavailableException('Places along the route need a TomTom key on the server');
+    const ck = `${cacheKey}:${kind}`;
+    const hit = this.cache.get(ck);
+    if (hit) return hit;
+    if (!this.quota.take('tomtom-search')) throw new ServiceUnavailableException('Place search is paused for this month (free allowance used)');
+
+    // TomTom takes at most a few thousand route points; keep every nth so long routes still fit.
+    const step = Math.max(1, Math.ceil(geometry.length / 1000));
+    const points = geometry.filter((_, i) => i % step === 0 || i === geometry.length - 1).map(([lon, lat]) => ({ lat, lon }));
+    const k = ALONG_KINDS[kind];
+    const url = `https://api.tomtom.com/search/2/searchAlongRoute/${encodeURIComponent(k.query)}.json?key=${key}&maxDetourTime=600&categorySet=${k.categories}&limit=15&sortBy=detourTime`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'User-Agent': UA() },
+      body: JSON.stringify({ route: { points } }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) throw new ServiceUnavailableException('Place search is not available right now');
+    type R = { results?: { poi?: { name?: string }; position: { lat: number; lon: number }; detourTime?: number; address?: { freeformAddress?: string; streetName?: string } }[] };
+    const data = (await res.json()) as R;
+    const list = (data.results ?? []).filter((r) => r.poi?.name).map((r) => ({
+      name: r.poi!.name!,
+      lat: r.position.lat,
+      lon: r.position.lon,
+      // TomTom can report a slightly negative detour (the stop is on a quicker line); treat it as on the route.
+      detourMin: Math.max(0, Math.round((r.detourTime ?? 0) / 60)),
+      address: r.address?.streetName ?? r.address?.freeformAddress ?? '',
+    }));
+    this.cache.set(ck, list, 15 * 60 * 1000);
+    return list;
+  }
+}
+
+export const PROVIDERS = [QuotaService, RoutingProvider, TrafficProvider, WeatherProvider, NewsProvider, PlacesProvider, AlongRouteProvider];

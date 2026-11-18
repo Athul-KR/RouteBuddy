@@ -33,7 +33,7 @@ export class InfoController {
   @Public()
   @Get('health')
   health() {
-    return { ok: true, traffic: !!process.env.TOMTOM_KEY, quota: this.quota.report() };
+    return { ok: true, traffic: !!process.env.TOMTOM_KEY, simulation: RouteStatusService.simulationAllowed, quota: this.quota.report() };
   }
 
   @Get('weather')

@@ -83,6 +83,7 @@ export class TtlCache<T> {
     return e.v;
   }
   set(k: string, v: T, ttlMs: number) { this.store.set(k, { v, exp: Date.now() + ttlMs }); }
+  deletePrefix(prefix: string) { for (const k of this.store.keys()) if (k.startsWith(prefix)) this.store.delete(k); }
 }
 
 /**
@@ -91,4 +92,19 @@ export class TtlCache<T> {
  */
 export function defined<T extends object>(o: T): Partial<T> {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
+/** The point a given fraction of the way along a polyline, by distance (0.5 = halfway). */
+export function pointAlong(line: [number, number][], fraction: number): [number, number] {
+  if (line.length < 2) return line[0];
+  const seg = line.slice(1).map((p, i) => haversine(line[i], p));
+  let target = seg.reduce((a, b) => a + b, 0) * fraction;
+  for (let i = 0; i < seg.length; i++) {
+    if (target <= seg[i] && seg[i] > 0) {
+      const t = target / seg[i];
+      return [line[i][0] + (line[i + 1][0] - line[i][0]) * t, line[i][1] + (line[i + 1][1] - line[i][1]) * t];
+    }
+    target -= seg[i];
+  }
+  return line[line.length - 1];
 }
