@@ -86,6 +86,15 @@ describe('Everyday Buddy API (e2e)', () => {
     await request(app.getHttpServer()).delete(`/v1/routes/${r.body.id}`).set(auth()).expect(204);
   });
 
+  it('chat validates input and says when the assistant is not set up', async () => {
+    await request(app.getHttpServer()).post('/v1/chat').set(auth()).send({ messages: [] }).expect(400);
+    await request(app.getHttpServer()).post('/v1/chat').set(auth()).send({ messages: [{ role: 'system', content: 'hi' }] }).expect(400);
+    await request(app.getHttpServer()).post('/v1/chat').send({ messages: [{ role: 'user', content: 'hi' }] }).expect(401);
+    if (!process.env.ANTHROPIC_API_KEY) {
+      await request(app.getHttpServer()).post('/v1/chat').set(auth()).send({ messages: [{ role: 'user', content: 'hi' }] }).expect(503);
+    }
+  });
+
   it('logs and undoes water', async () => {
     await request(app.getHttpServer()).post('/v1/water-logs').set(auth()).expect(201);
     const two = await request(app.getHttpServer()).post('/v1/water-logs').set(auth()).expect(201);

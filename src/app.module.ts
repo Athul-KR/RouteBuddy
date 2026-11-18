@@ -15,6 +15,7 @@ import { AlertsJob } from './routes/alerts.job.js';
 import { RouteStatusService } from './routes/route-status.service.js';
 import { RoutesController } from './routes/routes.controller.js';
 import { MeController } from './users/me.controller.js';
+import { ChatController } from './chat/chat.controller.js';
 
 @Module({
   imports: [
@@ -34,7 +35,7 @@ import { MeController } from './users/me.controller.js';
       useFactory: () => ({ secret: process.env.JWT_SECRET ?? 'dev-only-change-me' }),
     }),
   ],
-  controllers: [AuthController, MeController, RoutesController, RemindersController, NotificationsController, InfoController],
+  controllers: [AuthController, MeController, RoutesController, RemindersController, NotificationsController, InfoController, ChatController],
   providers: [...PROVIDERS, RouteStatusService, AlertsJob, { provide: APP_GUARD, useClass: JwtAuthGuard }],
 })
 export class AppModule {}
