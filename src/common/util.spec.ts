@@ -132,7 +132,7 @@ describe('isPolitical', () => {
   });
 });
 
-import { speakable, speechLang } from '../voice/voice.controller.js';
+import { speakable, speechLang, voiceOptions } from '../voice/voice.controller.js';
 
 describe('voice text', () => {
   it('reads Malayalam replies in Malayalam and others in English', () => {
@@ -148,5 +148,19 @@ describe('voice text', () => {
     const s = speakable(long);
     expect(s.length).toBeLessThanOrEqual(1500);
     expect(s.endsWith('.')).toBe(true);
+  });
+});
+
+describe('voice options', () => {
+  it('shows short names and labels, with the default voice first', () => {
+    const list = voiceOptions([
+      { voice_id: 'zzz111aaa', name: 'Aria - Calm narrator', labels: { gender: 'female', accent: 'american', age: 'young' } },
+      { voice_id: 'def000xyz', name: 'George', labels: { gender: 'male', accent: 'british', description: 'warm' } },
+      { voice_id: '', name: 'Broken' },
+    ], 'def000xyz');
+    expect(list).toEqual([
+      { id: 'def000xyz', name: 'George', about: 'Male · British', description: 'warm' },
+      { id: 'zzz111aaa', name: 'Aria', about: 'Female · American · Young', description: 'Calm narrator' },
+    ]);
   });
 });

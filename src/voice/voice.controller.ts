@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   Headers,
   HttpCode,
   HttpException,
@@ -11,7 +12,7 @@ import {
   Res,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
 import type { Response } from 'express';
 import { UserId } from '../common/auth.js';
 import { TtlCache } from '../common/util.js';
@@ -32,6 +33,39 @@ class SpeakDto {
   @IsString() @MinLength(1) @MaxLength(4000) text: string;
   /** 'ml' or 'en'; worked out from the text when left out. */
   @IsOptional() @IsString() @MaxLength(5) lang?: string;
+  /** The voice the user picked in Settings; the server's default when left out. */
+  @IsOptional() @Matches(/^[A-Za-z0-9]{8,40}$/, { message: 'Unknown voice.' }) voice?: string;
+}
+
+/** A voice the user can pick, as the app shows it. */
+export interface VoiceOption {
+  id: string;
+  name: string;
+  /** For example "Female · American · Young". */
+  about: string;
+  /** What it suits, e.g. "Warm, friendly narration". */
+  description: string;
+}
+
+/** ElevenLabs' voice list -> what the app shows, the server's default voice first, then by name. */
+export function voiceOptions(
+  list: { voice_id: string; name: string; category?: string; labels?: Record<string, string | undefined>; description?: string | null }[],
+  defaultId: string,
+): VoiceOption[] {
+  const cap = (x?: string) => (x ? x.charAt(0).toUpperCase() + x.slice(1).replace(/[_-]/g, ' ') : '');
+  return list
+    .filter((v) => v.voice_id && v.name)
+    .map((v) => {
+      const l = v.labels ?? {};
+      return {
+        id: v.voice_id,
+        // Library names often carry a tagline after a dash: "George - Warm, Captivating Storyteller".
+        name: v.name.split(/\s+-\s+/)[0].trim(),
+        about: [cap(l.gender), cap(l.accent), cap(l.age)].filter(Boolean).join(' · '),
+        description: (l.description ?? l.descriptive ?? v.name.split(/\s+-\s+/)[1] ?? v.description ?? '').toString().trim().slice(0, 80),
+      };
+    })
+    .sort((a, b) => (a.id === defaultId ? -1 : b.id === defaultId ? 1 : a.name.localeCompare(b.name)));
 }
 
 /** Malayalam script anywhere in the text means Malayalam speech. */
@@ -62,6 +96,7 @@ export function speakable(text: string): string {
 export class VoiceController {
   private log = new Logger('Voice');
   private usage = new TtlCache<number>();
+  private voices = new TtlCache<VoiceOption[]>();
 
   private key(): string {
     const k = (process.env.ELEVENLABS_API_KEY ?? '').trim().replace(/^["']|["']$/g, '').trim();
@@ -82,6 +117,21 @@ export class VoiceController {
     if (res.status === 401) throw new ServiceUnavailableException('Voice is not set up correctly on this server.');
     if (res.status === 429) throw new HttpException('Voice is busy right now. Try again in a minute.', HttpStatus.TOO_MANY_REQUESTS);
     throw new ServiceUnavailableException(`Couldn't ${what} right now. Try again in a moment.`);
+  }
+
+  /** The voices Buddy can speak with (for Settings), with the server's default first. */
+  @Get('voices')
+  async list(@UserId() _userId: number): Promise<{ default: string; voices: VoiceOption[] }> {
+    const key = this.key();
+    let voices = this.voices.get('all');
+    if (!voices) {
+      const res = await fetch(`${API}/voices`, { headers: { 'xi-api-key': key }, signal: AbortSignal.timeout(15000) });
+      if (!res.ok) return this.fail(res, 'load the voices');
+      const j = (await res.json()) as { voices?: Parameters<typeof voiceOptions>[0] };
+      voices = voiceOptions(j.voices ?? [], VOICE_ID);
+      this.voices.set('all', voices, 60 * 60 * 1000);
+    }
+    return { default: VOICE_ID, voices };
   }
 
   /** The recording (raw audio in the request body, e.g. audio/mp4) -> the words, and the language heard. */
@@ -111,7 +161,7 @@ export class VoiceController {
     const text = speakable(d.text);
     if (!text) throw new BadRequestException('Nothing to read aloud.');
     this.count(userId, 'tts');
-    const res = await fetch(`${API}/text-to-speech/${VOICE_ID}?output_format=mp3_44100_64`, {
+    const res = await fetch(`${API}/text-to-speech/${d.voice ?? VOICE_ID}?output_format=mp3_44100_64`, {
       method: 'POST',
       headers: { 'xi-api-key': key, 'content-type': 'application/json', accept: 'audio/mpeg' },
       body: JSON.stringify({ text, model_id: TTS_MODEL, language_code: speechLang(text, d.lang) }),

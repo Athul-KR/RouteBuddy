@@ -107,6 +107,9 @@ describe('Everyday Buddy API (e2e)', () => {
     process.env.ELEVENLABS_API_KEY = 'test-key-not-used';
     await request(app.getHttpServer()).post('/v1/voice/transcribe').set(auth()).set('content-type', 'audio/mp4').send(Buffer.alloc(10)).expect(400);
     await request(app.getHttpServer()).post('/v1/voice/speak').set(auth()).send({ text: '' }).expect(400);
+    // A voice id is only letters and digits, so it can't change the ElevenLabs address.
+    await request(app.getHttpServer()).post('/v1/voice/speak').set(auth()).send({ text: 'Hi', voice: '../../x' }).expect(400);
+    await request(app.getHttpServer()).get('/v1/voice/voices').expect(401);
     if (saved === undefined) delete process.env.ELEVENLABS_API_KEY; else process.env.ELEVENLABS_API_KEY = saved;
   });
 
