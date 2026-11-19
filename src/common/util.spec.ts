@@ -116,3 +116,18 @@ describe('repairXml', () => {
     expect(repairXml('<t>Kerala & India &amp; World &#8217; &#x200d; &nbsp;</t>')).toBe('<t>Kerala &amp; India &amp; World &#8217; &#x200d; &nbsp;</t>');
   });
 });
+
+import { isPolitical } from '../providers/providers.js';
+
+describe('isPolitical', () => {
+  it('spots political stories in English and Malayalam', () => {
+    expect(isPolitical('UDF sub-committee to discuss liquor policy draft before CM')).toBe(true);
+    expect(isPolitical('Pinarayi Vijayan meets Governor')).toBe(true);
+    expect(isPolitical('മന്ത്രിസഭാ യോഗത്തിൽ നിർണായക തീരുമാനം')).toBe(true);
+    expect(isPolitical('പിഎം ശ്രീയിൽ ഒപ്പിട്ടത് അബദ്ധം: എല്‍ഡിഎഫ് കണ്‍വീനര്‍')).toBe(true);
+  });
+  it('leaves other stories out', () => {
+    expect(isPolitical('Kerala Blasters win 2-0 at home')).toBe(false);
+    expect(isPolitical('കോഴിക്കോട് ബീച്ചിൽ കനത്ത മഴ')).toBe(false);
+  });
+});

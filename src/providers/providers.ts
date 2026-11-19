@@ -406,6 +406,8 @@ export interface NewsItem {
   image?: string;
   /** A sentence or two from the feed, plain text, when it has one. Never the full article. */
   summary?: string;
+  /** Extra topics a story also belongs to, e.g. 'Politics' for a political Kerala story. */
+  tags?: string[];
 }
 
 /**
@@ -457,7 +459,24 @@ export function itemImage(it: FeedItemImages): string | undefined {
 
 export type NewsLang = 'en' | 'ml';
 export const NEWS_LANGS: NewsLang[] = ['en', 'ml'];
-export const NEWS_TOPICS = ['Local', 'Kerala', 'India', 'World', 'Tech'];
+/** Topics mixed into "For you", closest to home first. Politics is drawn from Kerala and India stories, so it isn't mixed in twice. */
+export const NEWS_TOPICS = ['Local', 'Kerala', 'India', 'World', 'Sports', 'Entertainment', 'Tech'];
+
+/**
+ * Words that mark a story as political, in English and Malayalam (both spellings Malayalam sites use for some
+ * letters). Used to fill the Politics tab from Kerala, India, local and world news, since no Malayalam publisher
+ * has a current politics feed.
+ */
+const POLITICS_EN = /\b(BJP|Congress|CPI\(M\)|CPI-M|CPM|CPI|LDF|UDF|NDA|IUML|AAP|DMK|election|elections|polls?|bypoll|by-election|minister|ministers|chief minister|MLA|MLAs|MP|MPs|Lok Sabha|Rajya Sabha|Assembly|Parliament|party|parties|Opposition|cabinet|Governor|Modi|Rahul Gandhi|Pinarayi|Satheesan|KPCC|candidate|manifesto|coalition|Prime Minister)\b/i;
+const POLITICS_ML = [
+  'മന്ത്രി', 'മുഖ്യമന്ത്രി', 'മന്ത്രിസഭ', 'കോൺഗ്രസ്', 'കോണ്‍ഗ്രസ്', 'സിപിഎം', 'സി.പി.എം', 'സിപിഐ', 'ബിജെപി', 'ബി.ജെ.പി',
+  'എൽഡിഎഫ്', 'എല്‍ഡിഎഫ്', 'യുഡിഎഫ്', 'യു.ഡി.എഫ്', 'എൻഡിഎ', 'എന്‍ഡിഎ', 'തിരഞ്ഞെടുപ്പ്', 'തെരഞ്ഞെടുപ്പ്', 'എംഎൽഎ', 'എംഎല്‍എ',
+  'എംപി', 'നിയമസഭ', 'പാർലമെന്റ്', 'പാര്‍ലമെന്റ്', 'പാർട്ടി', 'പാര്‍ട്ടി', 'മോദി', 'രാഹുൽ', 'രാഹുല്‍', 'പിണറായി', 'സതീശൻ', 'സതീശന്‍',
+  'ഗവർണർ', 'ഗവര്‍ണര്‍', 'മുസ്ലിം ലീഗ്', 'കെപിസിസി', 'സ്ഥാനാർത്ഥി', 'സ്ഥാനാര്‍ത്ഥി', 'പ്രതിപക്ഷ', 'രാഷ്ട്രീയ',
+];
+export function isPolitical(title: string): boolean {
+  return POLITICS_EN.test(title) || POLITICS_ML.some((w) => title.includes(w));
+}
 
 interface Feed {
   topic: string;
@@ -497,6 +516,16 @@ function feedsFor(lang: NewsLang, city: string): Feed[] {
       { topic: 'Tech', source: 'Mathrubhumi', url: 'https://www.mathrubhumi.com/rss/technology' },
       { topic: 'Tech', source: 'News18 Malayalam', url: 'https://malayalam.news18.com/commonfeeds/v1/mal/rss/tech.xml' },
       { topic: 'Tech', source: 'Asianet News', url: 'https://www.asianetnews.com/rss/technology' },
+      { topic: 'Sports', source: 'Mathrubhumi', url: 'https://www.mathrubhumi.com/rss/sports' },
+      { topic: 'Sports', source: 'Asianet News', url: 'https://www.asianetnews.com/rss/sports' },
+      { topic: 'Sports', source: 'News18 Malayalam', url: 'https://malayalam.news18.com/commonfeeds/v1/mal/rss/sports.xml' },
+      { topic: 'Sports', source: 'Janayugom', url: 'https://janayugomonline.com/category/sports/feed/' },
+      { topic: 'Entertainment', source: 'Mathrubhumi', url: 'https://www.mathrubhumi.com/rss/movies-music' },
+      { topic: 'Entertainment', source: 'Asianet News', url: 'https://www.asianetnews.com/rss/entertainment' },
+      { topic: 'Entertainment', source: 'News18 Malayalam', url: 'https://malayalam.news18.com/commonfeeds/v1/mal/rss/film.xml' },
+      { topic: 'Entertainment', source: 'Janayugom', url: 'https://janayugomonline.com/category/entertainment/feed/' },
+      // Politics comes from Kerala and India stories (see isPolitical); Google News fills in only if too few match.
+      { topic: 'Politics', url: gnSearch('ml', 'രാഷ്ട്രീയം when:2d'), backup: true },
       // If every publisher feed fails, Google News still covers Kerala (headlines only, no photos).
       { topic: 'Kerala', url: gnSearch('ml', 'കേരളം when:1d'), backup: true },
     ];
@@ -507,6 +536,9 @@ function feedsFor(lang: NewsLang, city: string): Feed[] {
     { topic: 'India', source: 'The Hindu', url: 'https://www.thehindu.com/news/national/feeder/default.rss' },
     { topic: 'World', source: 'The Hindu', url: 'https://www.thehindu.com/news/international/feeder/default.rss' },
     { topic: 'Tech', source: 'The Hindu', url: 'https://www.thehindu.com/sci-tech/technology/feeder/default.rss' },
+    { topic: 'Sports', source: 'The Hindu', url: 'https://www.thehindu.com/sport/feeder/default.rss' },
+    { topic: 'Entertainment', source: 'The Hindu', url: 'https://www.thehindu.com/entertainment/feeder/default.rss' },
+    { topic: 'Politics', source: 'Indian Express', url: 'https://indianexpress.com/section/political-pulse/feed/' },
   ];
 }
 
@@ -542,7 +574,7 @@ export class NewsProvider {
       items = await p;
       if (items.length) this.cache.set(key, items, 30 * 60 * 1000);
     }
-    if (topic && topic !== 'all') return items.filter((i) => i.topic === topic).slice(0, 40);
+    if (topic && topic !== 'all') return items.filter((i) => i.topic === topic || i.tags?.includes(topic)).slice(0, 40);
     // "For you": take turns across topics, closest to home first, so local stories lead.
     const groups = NEWS_TOPICS.map((t) => items.filter((i) => i.topic === t));
     const mixed: NewsItem[] = [];
@@ -566,6 +598,11 @@ export class NewsProvider {
       }),
     );
     const hasMain = new Set(results.filter((r) => !r.f.backup && r.items.length).map((r) => r.f.topic));
+    // Politics has no main feed in Malayalam: count political stories among the news topics instead.
+    const politicalCount = results
+      .filter((r) => ['Local', 'Kerala', 'India', 'World'].includes(r.f.topic))
+      .reduce((n, r) => n + r.items.filter((it) => it.title && isPolitical(it.title)).length, 0);
+    if (politicalCount >= 6) hasMain.add('Politics');
     for (const { f, items } of results) {
       if (f.backup && hasMain.has(f.topic)) continue;
       for (const it of items) {
@@ -575,7 +612,8 @@ export class NewsProvider {
         if (seen.has(it.link) || seen.has(k)) continue;
         seen.add(it.link);
         seen.add(k);
-        out.push({ title, link: it.link.trim(), source, topic: f.topic, published: it.isoDate ?? new Date().toISOString(), image: itemImage(it), summary: summaryOf(it.contentSnippet ?? it.content ?? (it as { summary?: string }).summary) });
+        const tags = ['Local', 'Kerala', 'India', 'World'].includes(f.topic) && isPolitical(title) ? ['Politics'] : undefined;
+        out.push({ tags, title, link: it.link.trim(), source, topic: f.topic, published: it.isoDate ?? new Date().toISOString(), image: itemImage(it), summary: summaryOf(it.contentSnippet ?? it.content ?? (it as { summary?: string }).summary) });
       }
     }
     const weekAgo = Date.now() - 7 * 864e5;
