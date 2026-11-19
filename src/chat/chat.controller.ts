@@ -68,7 +68,7 @@ Write for a phone screen: short, friendly answers, a few sentences or a short li
 
 const BRIEFING = `You are Buddy, the friendly assistant in Everyday Buddy, a daily companion app used mostly in Kerala, India.
 Write the user's daily briefing from the snapshot of their data. It is shown in the chat and read aloud, the first time they open the app today.
-- Greet them by first name for the time of day (morning, afternoon or evening; use the time in the snapshot).
+- Greet them by first name for the time of day (morning, afternoon or evening; use the time in the snapshot). In Malayalam use a Malayalam greeting, such as സുപ്രഭാതം in the morning or നമസ്കാരം later, not English words in Malayalam letters.
 - Today's weather in their city: the temperature, and whether to expect rain and when.
 - Their reminders still to come today, with times (skip ones marked done). If there are many, give the first few and say how many more. If none, say the day is free.
 - Each saved route that runs today: how traffic looks right now, any delay or closure, and the time to leave by if the snapshot gives one. Skip routes that don't run today; if there are no routes, leave this out.
@@ -144,7 +144,10 @@ export class ChatController {
 
   /** Counts a request against the user's hourly allowance. */
   private spend(userId: number) {
-    this.spend(userId);
+    const hourKey = `${userId}:${new Date().toISOString().slice(0, 13)}`;
+    const used = this.usage.get(hourKey) ?? 0;
+    if (used >= HOURLY_LIMIT) throw new HttpException('You have sent a lot of messages this hour. Try again a little later.', HttpStatus.TOO_MANY_REQUESTS);
+    this.usage.set(hourKey, used + 1, 60 * 60 * 1000);
   }
 
   @Post('briefing')
@@ -195,10 +198,7 @@ Write my briefing for today in ${lang === 'ml' ? 'Malayalam' : 'English'}.`,
     while (history.length && history[0].role !== 'user') history.shift();
     if (!history.length || history[history.length - 1].role !== 'user') throw new HttpException('The last message must be from you.', HttpStatus.BAD_REQUEST);
 
-    const hourKey = `${userId}:${new Date().toISOString().slice(0, 13)}`;
-    const used = this.usage.get(hourKey) ?? 0;
-    if (used >= HOURLY_LIMIT) throw new HttpException('You have sent a lot of messages this hour. Try again a little later.', HttpStatus.TOO_MANY_REQUESTS);
-    this.usage.set(hourKey, used + 1, 60 * 60 * 1000);
+    this.spend(userId);
 
     const messages: Anthropic.Beta.BetaMessageParam[] = history.map((m) => ({ role: m.role, content: m.content }));
     // Fresh data for this question, as an operator message right after it.
