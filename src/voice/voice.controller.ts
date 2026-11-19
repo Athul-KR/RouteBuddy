@@ -62,7 +62,7 @@ export function voiceOptions(
         // Library names often carry a tagline after a dash: "George - Warm, Captivating Storyteller".
         name: v.name.split(/\s+-\s+/)[0].trim(),
         about: [cap(l.gender), cap(l.accent), cap(l.age)].filter(Boolean).join(' · '),
-        description: (l.description ?? l.descriptive ?? v.name.split(/\s+-\s+/)[1] ?? v.description ?? '').toString().trim().slice(0, 80),
+        description: cap((l.description ?? l.descriptive ?? v.name.split(/\s+-\s+/)[1] ?? v.description ?? '').toString().trim().slice(0, 80)),
       };
     })
     .sort((a, b) => (a.id === defaultId ? -1 : b.id === defaultId ? 1 : a.name.localeCompare(b.name)));

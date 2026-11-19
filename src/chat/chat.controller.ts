@@ -12,13 +12,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsInt, IsNumber, IsOptional, IsString, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
 import { Repository } from 'typeorm';
 import { UserId } from '../common/auth.js';
 import { DEFAULT_SETTINGS, Reminder, SavedRoute, User, WaterLog } from '../common/entities.js';
-import { localParts, TtlCache, today } from '../common/util.js';
+import { haversine, localParts, TtlCache, today } from '../common/util.js';
 import { PlacesProvider, RoutingProvider, WeatherProvider } from '../providers/providers.js';
-import { Changed, chatTools } from './chat.tools.js';
+import { Changed, chatTools, type ToolDeps } from './chat.tools.js';
 import { forToday } from '../reminders/reminders.controller.js';
 import { RouteStatusService } from '../routes/route-status.service.js';
 import { waterSummary } from '../reminders/water.js';
@@ -32,6 +32,9 @@ class ChatMessageDto {
 class DeviceDto {
   @IsOptional() @IsInt() @Min(0) @Max(200000) steps?: number;
   @IsOptional() @IsInt() @Min(0) @Max(200000) stepsGoal?: number;
+  /** Where the phone is, when the user allows location. Used for this answer only, never stored. */
+  @IsOptional() @IsNumber() @Min(-90) @Max(90) lat?: number;
+  @IsOptional() @IsNumber() @Min(-180) @Max(180) lon?: number;
 }
 
 /** The day's spoken briefing: in the user's news language unless the app asks for another. */
@@ -58,6 +61,10 @@ Each conversation includes a snapshot of the user's data at the moment of the qu
 
 You can also answer everyday questions on any topic.
 
+The snapshot may include where the user is right now, from their phone. When they say "here", "from here", "near me" or "my location", use it: pass CURRENT_LOCATION as the place to your tools. If the snapshot has no current location, ask them to name the place instead of guessing. When they ask about the weather without naming a place, answer for where they are now if the snapshot has it.
+
+To answer "how long to reach X" or "how far is X", use trip_time; it changes nothing.
+
 You can make three changes for the user with your tools: log water (log_water), add a reminder to their schedule (add_reminder), and save a regular route (add_route). Use them when the user asks, or clearly says they did something, like "I just drank two glasses". Don't make changes they didn't ask for.
 - For a reminder, a title and a time are enough. If no day is given, use today; if that time has already passed today, ask whether they meant tomorrow.
 - For a route you need where they start, where they go, and when they leave. If any is missing or vague ("home", "office"), ask for the area or a landmark first. After saving, say which places were matched so they can check.
@@ -69,7 +76,7 @@ Write for a phone screen: short, friendly answers, a few sentences or a short li
 const BRIEFING = `You are Buddy, the friendly assistant in Everyday Buddy, a daily companion app used mostly in Kerala, India.
 Write the user's daily briefing from the snapshot of their data. It is shown in the chat and read aloud, the first time they open the app today.
 - Greet them by first name for the time of day (morning, afternoon or evening; use the time in the snapshot). In Malayalam use a Malayalam greeting, such as സുപ്രഭാതം in the morning or നമസ്കാരം later, not English words in Malayalam letters.
-- Today's weather in their city: the temperature, and whether to expect rain and when.
+- Today's weather where they are (their current location if the snapshot has it, otherwise their city): the temperature, and whether to expect rain and when.
 - Their reminders still to come today, with times (skip ones marked done). If there are many, give the first few and say how many more. If none, say the day is free.
 - Each saved route that runs today: how traffic looks right now, any delay or closure, and the time to leave by if the snapshot gives one. Skip routes that don't run today; if there are no routes, leave this out.
 - End with a short, warm wish for the day.
@@ -95,7 +102,14 @@ export class ChatController {
   ) {}
 
   /** The user's data right now, as plain text for the model. Each part fails on its own. */
-  private async snapshot(user: User, device?: DeviceDto): Promise<string> {
+  /** The phone's location with a readable name, or undefined when the app didn't send one. */
+  private async here(device?: DeviceDto): Promise<ToolDeps['here']> {
+    if (device?.lat === undefined || device.lon === undefined) return undefined;
+    const name = (await this.places.describe(device.lat, device.lon)) ?? `${device.lat.toFixed(4)}, ${device.lon.toFixed(4)}`;
+    return { lat: device.lat, lon: device.lon, name };
+  }
+
+  private async snapshot(user: User, device?: DeviceDto, here?: ToolDeps['here']): Promise<string> {
     const userId = user.id;
     const settings = { ...DEFAULT_SETTINGS, ...user.settings };
     const now = localParts();
@@ -138,6 +152,22 @@ export class ChatController {
       if (w.rainSoon) line += ` Rain expected ${w.rainSoon.from}-${w.rainSoon.to}.`;
       lines.push(line);
     }
+    if (here) {
+      lines.push(`The user is now at: ${here.name} (from the phone's location).`);
+      // Weather where they are, when that's away from their home city.
+      if (haversine([here.lon, here.lat], [user.lon, user.lat]) > 15000) {
+        const h = await this.weather.forecast(here.lat, here.lon).catch(() => null);
+        if (h) {
+          const t = h.daily[0];
+          let line = `Weather where the user is now: ${h.now.temp}°C, ${h.now.symbol.replace(/_/g, ' ')}.`;
+          if (t) line += ` Today ${t.min}-${t.max}°C, rain ${t.rainMm} mm.`;
+          if (h.rainSoon) line += ` Rain expected ${h.rainSoon.from}-${h.rainSoon.to}.`;
+          lines.push(line);
+        }
+      }
+    } else {
+      lines.push("Current location: not shared (the user hasn't allowed location, or it isn't available).");
+    }
     if (device?.steps !== undefined) lines.push(`Steps today (from the phone): ${device.steps}${device.stepsGoal ? ` of ${device.stepsGoal} goal` : ''}.`);
     return lines.join('\n');
   }
@@ -169,7 +199,7 @@ export class ChatController {
         messages: [{
           role: 'user',
           content: `Snapshot of my data:
-${await this.snapshot(user, dto.device)}
+${await this.snapshot(user, dto.device, await this.here(dto.device))}
 
 Write my briefing for today in ${lang === 'ml' ? 'Malayalam' : 'English'}.`,
         }],
@@ -204,10 +234,11 @@ Write my briefing for today in ${lang === 'ml' ? 'Malayalam' : 'English'}.`,
     // Fresh data for this question, as an operator message right after it.
     const user = await this.users.findOneBy({ id: userId });
     if (!user) throw new NotFoundException();
-    messages.push({ role: 'system', content: `Snapshot of the user's data:\n${await this.snapshot(user, dto.device)}` });
+    const here = await this.here(dto.device);
+    messages.push({ role: 'system', content: `Snapshot of the user's data:\n${await this.snapshot(user, dto.device, here)}` });
 
     const changed = new Set<Changed>();
-    const tools = chatTools({ user, water: this.water, reminders: this.reminders, routes: this.routes, places: this.places, routing: this.routing }, changed);
+    const tools = chatTools({ user, water: this.water, reminders: this.reminders, routes: this.routes, places: this.places, routing: this.routing, here }, changed);
     const result = (reply: string) => ({ reply, changed: [...changed] });
 
     try {

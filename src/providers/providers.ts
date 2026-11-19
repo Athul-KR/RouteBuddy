@@ -716,6 +716,18 @@ export class PlacesProvider {
     return out.slice(0, 8);
   }
 
+  /** A short label for where a point is, like "Pattom, Thiruvananthapuram". Null when the lookup fails. */
+  async describe(lat: number, lon: number): Promise<string | null> {
+    try {
+      const data = await getJson<{ features: { properties: Record<string, string> }[] }>(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}`);
+      const p = data.features[0]?.properties ?? {};
+      const parts = [p.name ?? p.street, p.district ?? p.locality, p.city ?? p.county].filter((x): x is string => !!x);
+      return [...new Set(parts)].slice(0, 3).join(', ') || null;
+    } catch {
+      return null;
+    }
+  }
+
   async reverse(lat: number, lon: number): Promise<string> {
     try {
       const data = await getJson<{ features: { properties: Record<string, string> }[] }>(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}`);

@@ -15,6 +15,21 @@ export interface ToolDeps {
   routes: Repository<SavedRoute>;
   places: PlacesProvider;
   routing: RoutingProvider;
+  /** Where the phone is right now (sent by the app when the user allows location). */
+  here?: { lat: number; lon: number; name: string };
+}
+
+/** What the model passes as a place to mean the user's current location. */
+export const HERE = 'CURRENT_LOCATION';
+const HERE_HINT = `Use exactly "${HERE}" for where the user is right now ("here", "from here", "my location").`;
+const NO_HERE = `Error: the phone's location isn't available. Ask the user to name the place, or to allow location for Everyday Buddy in the phone's settings.`;
+
+/** A place the user named, or their current location for HERE. */
+export async function resolvePlace(d: Pick<ToolDeps, 'places' | 'user' | 'here'>, text: string): Promise<Place | 'no-here' | undefined> {
+  if (text.trim().toUpperCase() === HERE) {
+    return d.here ? { name: d.here.name, detail: 'your current location', lat: d.here.lat, lon: d.here.lon } : 'no-here';
+  }
+  return findPlace(d, text);
 }
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -123,8 +138,8 @@ export function chatTools(d: ToolDeps, changed: Set<Changed>) {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Short name, e.g. "Office". Empty string to name it after the places.' },
-        from: { type: 'string', description: 'Start place as the user said it, with the town if known, e.g. "Kaloor, Kochi".' },
-        to: { type: 'string', description: 'Destination as the user said it, with the town if known, e.g. "Infopark, Kakkanad".' },
+        from: { type: 'string', description: `Start place as the user said it, with the town if known, e.g. "Kaloor, Kochi". ${HERE_HINT}` },
+        to: { type: 'string', description: `Destination as the user said it, with the town if known, e.g. "Infopark, Kakkanad". ${HERE_HINT}` },
         depart_time: { type: 'string', description: '24-hour time HH:mm the user leaves.' },
         days: { type: 'array', items: { type: 'integer' }, description: 'Days of the week the trip happens, 0 = Sunday ... 6 = Saturday. Monday to Friday if the user did not say.' },
         vehicle: { type: 'string', enum: ['car', 'bike2', 'cycle', 'walk'], description: 'bike2 is a two-wheeler (scooter or motorbike). Car if the user did not say.' },
@@ -139,7 +154,8 @@ export function chatTools(d: ToolDeps, changed: Set<Changed>) {
       if (!(vehicle in VEHICLE_NAMES)) return 'Error: unknown vehicle.';
       if ((await d.routes.countBy({ userId })) >= 20) return 'Error: the user already has 20 saved routes. Ask them to delete one in Routes first.';
 
-      const [a, b] = await Promise.all([findPlace(d, from), findPlace(d, to)]);
+      const [a, b] = await Promise.all([resolvePlace(d, from), resolvePlace(d, to)]);
+      if (a === 'no-here' || b === 'no-here') return NO_HERE;
       if (!a) return `Error: couldn't find "${from}". Ask the user for a nearby landmark or the area name.`;
       if (!b) return `Error: couldn't find "${to}". Ask the user for a nearby landmark or the area name.`;
 
@@ -168,5 +184,41 @@ export function chatTools(d: ToolDeps, changed: Set<Changed>) {
     },
   });
 
-  return [logWater, addReminder, addRoute];
+  const tripTime = betaTool({
+    name: 'trip_time',
+    description:
+      'How long a trip takes right now (with live traffic for car and two-wheeler) and how far it is, with up to three ways to go. ' +
+      'Use for "how long to reach X", "how far is X from here", "when should I leave to get to X". Changes nothing.',
+    strict: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', description: `Start place, with the town if known. ${HERE_HINT}` },
+        to: { type: 'string', description: `Destination, with the town if known. ${HERE_HINT}` },
+        vehicle: { type: 'string', enum: ['car', 'bike2', 'cycle', 'walk'], description: "bike2 is a two-wheeler. The user's usual vehicle if they did not say." },
+      },
+      required: ['from', 'to', 'vehicle'],
+      additionalProperties: false,
+    },
+    run: async ({ from, to, vehicle }) => {
+      if (!(vehicle in VEHICLE_NAMES)) return 'Error: unknown vehicle.';
+      const [a, b] = await Promise.all([resolvePlace(d, from), resolvePlace(d, to)]);
+      if (a === 'no-here' || b === 'no-here') return NO_HERE;
+      if (!a) return `Error: couldn't find "${from}". Ask the user for a nearby landmark or the area name.`;
+      if (!b) return `Error: couldn't find "${to}". Ask the user for a nearby landmark or the area name.`;
+      const v = vehicle as Vehicle;
+      const options = await d.routing.options([a.lon, a.lat], [b.lon, b.lat], v).catch(() => []);
+      if (!options.length) return `Error: no ${VEHICLE_NAMES[v]} route found between ${a.name} and ${b.name}.`;
+      const lines = options.map((o) => {
+        const delay = o.minutes - o.usualMin;
+        return `- ${o.label}: ${o.minutes} min, ${o.distanceKm} km${o.via ? ` via ${o.via}` : ''}${delay >= 3 ? ` (${delay} min slower than usual because of traffic)` : ''}`;
+      });
+      return (
+        `By ${VEHICLE_NAMES[v]} from ${a.name} (${a.detail}) to ${b.name} (${b.detail}), leaving now:\n${lines.join('\n')}\n` +
+        'Say which places were matched. The user can save it as a regular trip (add_route) or plan it on the map in Routes.'
+      );
+    },
+  });
+
+  return [logWater, addReminder, addRoute, tripTime];
 }

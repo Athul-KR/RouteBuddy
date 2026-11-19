@@ -159,7 +159,7 @@ describe('voice options', () => {
       { voice_id: '', name: 'Broken' },
     ], 'def000xyz');
     expect(list).toEqual([
-      { id: 'def000xyz', name: 'George', about: 'Male · British', description: 'warm' },
+      { id: 'def000xyz', name: 'George', about: 'Male · British', description: 'Warm' },
       { id: 'zzz111aaa', name: 'Aria', about: 'Female · American · Young', description: 'Calm narrator' },
     ]);
   });
