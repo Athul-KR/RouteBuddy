@@ -21,7 +21,9 @@ export interface ToolDeps {
 
 /** What the model passes as a place to mean the user's current location. */
 export const HERE = 'CURRENT_LOCATION';
-const HERE_HINT = `Use exactly "${HERE}" for where the user is right now ("here", "from here", "my location").`;
+const HERE_HINT =
+  `Use exactly "${HERE}" for where the user is right now ("here", "from here", "my location"). ` +
+  'Write other places in English letters with the town, e.g. "East Fort, Thiruvananthapuram", even when the user wrote in Malayalam.';
 const NO_HERE = `Error: the phone's location isn't available. Ask the user to name the place, or to allow location for Everyday Buddy in the phone's settings.`;
 
 /** A place the user named, or their current location for HERE. */
@@ -44,11 +46,13 @@ const norm = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[^\p{L}\p
  * mentions the town above the area itself, so both the full text and the part before the comma are searched, and a
  * result whose name matches what the user said wins; otherwise the search's own first result (closest to home).
  */
-export async function findPlace(d: Pick<ToolDeps, 'places' | 'user'>, text: string): Promise<Place | undefined> {
+export async function findPlace(d: Pick<ToolDeps, 'places' | 'user' | 'here'>, text: string): Promise<Place | undefined> {
   const full = text.trim();
   const head = full.split(',')[0].trim();
   const queries = [...new Set([head, full].filter((q) => q.length >= 2))];
-  const lists = await Promise.all(queries.map((q) => d.places.search(q, d.user.lat, d.user.lon).catch(() => [] as Place[])));
+  // Places near where the user is now rank first; otherwise near home.
+  const near = d.here ?? d.user;
+  const lists = await Promise.all(queries.map((q) => d.places.search(q, near.lat, near.lon).catch(() => [] as Place[])));
   const all = lists.flat();
   if (!all.length) return undefined;
   const want = norm(head);

@@ -1,4 +1,4 @@
-import { findPlace } from './chat.tools.js';
+import { findPlace, HERE, resolvePlace } from './chat.tools.js';
 import type { Place } from '../providers/providers.js';
 import type { User } from '../common/entities.js';
 
@@ -20,5 +20,19 @@ describe('findPlace', () => {
   });
   it('returns nothing when the search finds nothing', async () => {
     expect(await findPlace({ places: fakePlaces({}), user }, 'Nowhere')).toBeUndefined();
+  });
+});
+
+describe('resolvePlace', () => {
+  const here = { lat: 8.52, lon: 76.94, name: 'Pattom, Thiruvananthapuram' };
+  it('uses the phone location for CURRENT_LOCATION', async () => {
+    expect(await resolvePlace({ places: fakePlaces({}), user, here }, HERE)).toEqual({ name: here.name, detail: 'your current location', lat: 8.52, lon: 76.94 });
+  });
+  it('says so when the location was not shared', async () => {
+    expect(await resolvePlace({ places: fakePlaces({}), user }, 'current_location')).toBe('no-here');
+  });
+  it('searches for any other place', async () => {
+    const places = fakePlaces({ Kaloor: [place('Kaloor')] });
+    expect((await resolvePlace({ places, user, here }, 'Kaloor')) as Place).toMatchObject({ name: 'Kaloor' });
   });
 });
