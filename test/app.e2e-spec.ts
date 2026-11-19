@@ -93,7 +93,10 @@ describe('Everyday Buddy API (e2e)', () => {
     await request(app.getHttpServer()).post('/v1/chat').send({ messages: [{ role: 'user', content: 'hi' }] }).expect(401);
     if (!process.env.ANTHROPIC_API_KEY) {
       await request(app.getHttpServer()).post('/v1/chat').set(auth()).send({ messages: [{ role: 'user', content: 'hi' }] }).expect(503);
+      await request(app.getHttpServer()).post('/v1/chat/briefing').set(auth()).send({}).expect(503);
     }
+    await request(app.getHttpServer()).post('/v1/chat/briefing').send({}).expect(401);
+    await request(app.getHttpServer()).post('/v1/chat/briefing').set(auth()).send({ lang: 'fr' }).expect(400);
   });
 
   it('voice needs a login, says when it is not set up, and rejects empty recordings', async () => {

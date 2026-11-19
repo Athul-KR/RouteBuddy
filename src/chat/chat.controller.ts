@@ -34,6 +34,12 @@ class DeviceDto {
   @IsOptional() @IsInt() @Min(0) @Max(200000) stepsGoal?: number;
 }
 
+/** The day's spoken briefing: in the user's news language unless the app asks for another. */
+class BriefingDto {
+  @IsOptional() @IsIn(['en', 'ml']) lang?: 'en' | 'ml';
+  @IsOptional() @ValidateNested() @Type(() => DeviceDto) device?: DeviceDto;
+}
+
 class ChatDto {
   @IsArray() @ArrayMinSize(1) @ArrayMaxSize(40) @ValidateNested({ each: true }) @Type(() => ChatMessageDto)
   messages: ChatMessageDto[];
@@ -59,6 +65,15 @@ You can make three changes for the user with your tools: log water (log_water), 
 You can't delete or edit things; for that, point them to Routes or Reminders.
 
 Write for a phone screen: short, friendly answers, a few sentences or a short list. The app shows plain text, so don't use markdown: no ** for bold, no # headings, no tables. For a list, start each line with "- ". Reply in the language the user writes in; if they write in Malayalam, reply in Malayalam.`;
+
+const BRIEFING = `You are Buddy, the friendly assistant in Everyday Buddy, a daily companion app used mostly in Kerala, India.
+Write the user's daily briefing from the snapshot of their data. It is shown in the chat and read aloud, the first time they open the app today.
+- Greet them by first name for the time of day (morning, afternoon or evening; use the time in the snapshot).
+- Today's weather in their city: the temperature, and whether to expect rain and when.
+- Their reminders still to come today, with times (skip ones marked done). If there are many, give the first few and say how many more. If none, say the day is free.
+- Each saved route that runs today: how traffic looks right now, any delay or closure, and the time to leave by if the snapshot gives one. Skip routes that don't run today; if there are no routes, leave this out.
+- End with a short, warm wish for the day.
+Use only facts from the snapshot; don't invent numbers. Keep it under 90 words, in 3 to 5 short sentences of natural spoken language: no lists, no markdown, no emoji, and say times the way people speak them (8:30 am). Write only the briefing itself.`;
 
 @Controller('v1/chat')
 export class ChatController {
@@ -125,6 +140,49 @@ export class ChatController {
     }
     if (device?.steps !== undefined) lines.push(`Steps today (from the phone): ${device.steps}${device.stepsGoal ? ` of ${device.stepsGoal} goal` : ''}.`);
     return lines.join('\n');
+  }
+
+  /** Counts a request against the user's hourly allowance. */
+  private spend(userId: number) {
+    this.spend(userId);
+  }
+
+  @Post('briefing')
+  @HttpCode(200)
+  async briefing(@UserId() userId: number, @Body() dto: BriefingDto): Promise<{ text: string; lang: 'en' | 'ml' }> {
+    if (!this.client) throw new ServiceUnavailableException('The assistant is not set up on this server yet.');
+    const user = await this.users.findOneBy({ id: userId });
+    if (!user) throw new NotFoundException();
+    this.spend(userId);
+    const lang = dto.lang ?? ({ ...DEFAULT_SETTINGS, ...user.settings }.newsLang === 'en' ? 'en' : 'ml');
+    try {
+      const response = await this.client.beta.messages.create({
+        model: MODEL,
+        max_tokens: 2000,
+        betas: ['server-side-fallback-2026-07-01'],
+        fallbacks: 'default',
+        output_config: { effort: 'low' },
+        system: BRIEFING,
+        messages: [{
+          role: 'user',
+          content: `Snapshot of my data:
+${await this.snapshot(user, dto.device)}
+
+Write my briefing for today in ${lang === 'ml' ? 'Malayalam' : 'English'}.`,
+        }],
+      });
+      const text = response.content
+        .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text')
+        .map((b) => b.text)
+        .join(' ')
+        .trim();
+      if (response.stop_reason === 'refusal' || !text) throw new ServiceUnavailableException("Buddy couldn't put today's briefing together.");
+      return { text, lang };
+    } catch (e) {
+      if (e instanceof HttpException) throw e;
+      this.log.error(`Briefing failed: ${(e as Error).message}`);
+      throw new ServiceUnavailableException("Buddy couldn't put today's briefing together.");
+    }
   }
 
   @Post()
