@@ -131,3 +131,22 @@ describe('isPolitical', () => {
     expect(isPolitical('കോഴിക്കോട് ബീച്ചിൽ കനത്ത മഴ')).toBe(false);
   });
 });
+
+import { speakable, speechLang } from '../voice/voice.controller.js';
+
+describe('voice text', () => {
+  it('reads Malayalam replies in Malayalam and others in English', () => {
+    expect(speechLang('ഇന്ന് മഴ പെയ്യും')).toBe('ml');
+    expect(speechLang('Rain is expected today')).toBe('en');
+    expect(speechLang('Rain', 'ml')).toBe('ml');
+  });
+  it('drops markdown, list dashes and links before speaking', () => {
+    expect(speakable('**Done!**\n- 18:00 Call mom\nSee https://x.example/a')).toBe('Done!\n18:00 Call mom\nSee');
+  });
+  it('keeps long replies to about 1,500 characters, ending on a sentence', () => {
+    const long = 'This is a sentence. '.repeat(120);
+    const s = speakable(long);
+    expect(s.length).toBeLessThanOrEqual(1500);
+    expect(s.endsWith('.')).toBe(true);
+  });
+});

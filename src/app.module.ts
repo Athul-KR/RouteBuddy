@@ -16,6 +16,7 @@ import { RouteStatusService } from './routes/route-status.service.js';
 import { RoutesController } from './routes/routes.controller.js';
 import { MeController } from './users/me.controller.js';
 import { ChatController } from './chat/chat.controller.js';
+import { VoiceController } from './voice/voice.controller.js';
 
 /**
  * Where data lives. With DATABASE_URL set (production) it's PostgreSQL, which survives deploys and restarts.
@@ -50,7 +51,7 @@ function databaseOptions(): TypeOrmModuleOptions {
       useFactory: () => ({ secret: process.env.JWT_SECRET ?? 'dev-only-change-me' }),
     }),
   ],
-  controllers: [AuthController, MeController, RoutesController, RemindersController, NotificationsController, InfoController, ChatController],
+  controllers: [AuthController, MeController, RoutesController, RemindersController, NotificationsController, InfoController, ChatController, VoiceController],
   providers: [...PROVIDERS, RouteStatusService, AlertsJob, { provide: APP_GUARD, useClass: JwtAuthGuard }],
 })
 export class AppModule {}

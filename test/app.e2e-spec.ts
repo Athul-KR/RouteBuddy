@@ -16,6 +16,7 @@ describe('Everyday Buddy API (e2e)', () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleFixture.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    (app as unknown as { useBodyParser: (t: string, o: object) => void }).useBodyParser('raw', { type: ['audio/*', 'application/octet-stream'], limit: '4mb' });
     await app.init();
   });
 
@@ -93,6 +94,17 @@ describe('Everyday Buddy API (e2e)', () => {
     if (!process.env.ANTHROPIC_API_KEY) {
       await request(app.getHttpServer()).post('/v1/chat').set(auth()).send({ messages: [{ role: 'user', content: 'hi' }] }).expect(503);
     }
+  });
+
+  it('voice needs a login, says when it is not set up, and rejects empty recordings', async () => {
+    await request(app.getHttpServer()).post('/v1/voice/speak').send({ text: 'Hi' }).expect(401);
+    const saved = process.env.ELEVENLABS_API_KEY;
+    delete process.env.ELEVENLABS_API_KEY;
+    await request(app.getHttpServer()).post('/v1/voice/speak').set(auth()).send({ text: 'Hi' }).expect(503);
+    process.env.ELEVENLABS_API_KEY = 'test-key-not-used';
+    await request(app.getHttpServer()).post('/v1/voice/transcribe').set(auth()).set('content-type', 'audio/mp4').send(Buffer.alloc(10)).expect(400);
+    await request(app.getHttpServer()).post('/v1/voice/speak').set(auth()).send({ text: '' }).expect(400);
+    if (saved === undefined) delete process.env.ELEVENLABS_API_KEY; else process.env.ELEVENLABS_API_KEY = saved;
   });
 
   it('logs and undoes water', async () => {
