@@ -4,6 +4,7 @@ import { IsNumber, IsOptional, IsString } from 'class-validator';
 import { DataSource, Repository } from 'typeorm';
 import { UserId } from '../common/auth.js';
 import { defined } from '../common/util.js';
+import { INTEREST_TOPICS } from '../providers/providers.js';
 import { AppNotification, DEFAULT_SETTINGS, Reminder, SavedRoute, User, UserSettings, WaterLog } from '../common/entities.js';
 
 class UpdateMeDto {
@@ -46,6 +47,11 @@ export class MeController {
     const u = await this.get(id);
     const allowed = Object.keys(DEFAULT_SETTINGS);
     const clean = Object.fromEntries(Object.entries(body).filter(([k]) => allowed.includes(k)));
+    // Interests: known topic names only.
+    if ('newsTopics' in clean) {
+      const list = Array.isArray(clean.newsTopics) ? clean.newsTopics : [];
+      clean.newsTopics = [...new Set(list.filter((t): t is string => typeof t === 'string' && INTEREST_TOPICS.includes(t)))];
+    }
     u.settings = { ...DEFAULT_SETTINGS, ...u.settings, ...clean };
     return publicUser(await this.users.save(u));
   }

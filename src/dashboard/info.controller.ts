@@ -46,9 +46,9 @@ export class InfoController {
   @Get('news')
   async getNews(@UserId() userId: number, @Query('topic') topic?: string, @Query('lang') lang?: string) {
     const user = await this.users.findOneBy({ id: userId });
-    const saved = { ...DEFAULT_SETTINGS, ...user?.settings }.newsLang;
-    const l = NEWS_LANGS.includes(lang as NewsLang) ? (lang as NewsLang) : saved;
-    return this.news.list(topic, l, user?.city);
+    const s = { ...DEFAULT_SETTINGS, ...user?.settings };
+    const l = NEWS_LANGS.includes(lang as NewsLang) ? (lang as NewsLang) : s.newsLang;
+    return this.news.list(topic, l, user?.city, s.newsTopics);
   }
 
   @Get('places/search')
@@ -73,7 +73,7 @@ export class InfoController {
 
     const [weather, headlines, status] = await Promise.all([
       this.weather.forecast(user.lat, user.lon).catch(() => null),
-      this.news.list(undefined, { ...DEFAULT_SETTINGS, ...user.settings }.newsLang, user.city).then((n) => n.slice(0, 3)).catch(() => []),
+      this.news.list(undefined, { ...DEFAULT_SETTINGS, ...user.settings }.newsLang, user.city, { ...DEFAULT_SETTINGS, ...user.settings }.newsTopics).then((n) => n.slice(0, 3)).catch(() => []),
       next ? this.statusSvc.status(next.route).catch(() => null) : Promise.resolve(null),
     ]);
 

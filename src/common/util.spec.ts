@@ -164,3 +164,28 @@ describe('voice options', () => {
     ]);
   });
 });
+
+import { forYou } from '../providers/providers.js';
+import type { NewsItem } from '../providers/providers.js';
+
+describe('For you news', () => {
+  const item = (topic: string, n: number, tags?: string[]): NewsItem =>
+    ({ title: `${topic} ${n}`, link: `https://x.example/${topic}/${n}`, source: 'X', topic, published: '2026-11-20T00:00:00Z', tags }) as NewsItem;
+  const items = [
+    ...[1, 2, 3].map((n) => item('Sports', n)),
+    ...[1, 2, 3].map((n) => item('Kerala', n, n === 1 ? ['Politics'] : undefined)),
+    ...[1, 2, 3].map((n) => item('Tech', n)),
+  ];
+  it('mixes every topic when no interests are set', () => {
+    expect(forYou(items).map((i) => i.title).slice(0, 3)).toEqual(['Kerala 1', 'Sports 1', 'Tech 1']);
+  });
+  it('puts the picked topics first, Politics from tags, then the rest when there are few', () => {
+    const list = forYou(items, ['Sports', 'Politics']).map((i) => i.title);
+    expect(list.slice(0, 4)).toEqual(['Sports 1', 'Kerala 1', 'Sports 2', 'Sports 3']);
+    expect(list).toHaveLength(9);
+    expect(new Set(list).size).toBe(9);
+  });
+  it('ignores unknown topics', () => {
+    expect(forYou(items, ['Gossip']).map((i) => i.title)).toEqual(forYou(items).map((i) => i.title));
+  });
+});

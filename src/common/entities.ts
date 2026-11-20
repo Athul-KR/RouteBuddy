@@ -20,6 +20,8 @@ export interface UserSettings {
   newsLang: 'en' | 'ml';
   /** Daily water goal in millilitres. */
   waterGoalMl: number;
+  /** News topics the user picked for "For you" (empty: a mix of everything). */
+  newsTopics: string[];
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
@@ -38,6 +40,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   waterOn: true,
   newsLang: 'ml',
   waterGoalMl: 2500,
+  newsTopics: [],
 };
 
 @Entity()

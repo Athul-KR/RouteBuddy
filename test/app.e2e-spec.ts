@@ -54,6 +54,11 @@ describe('Everyday Buddy API (e2e)', () => {
     expect(res.body.passwordHash).toBeUndefined();
   });
 
+  it('keeps only known news interests', async () => {
+    const res = await request(app.getHttpServer()).put('/v1/me/settings').set(auth()).send({ newsTopics: ['Sports', 'Politics', 'Gossip', 'Sports', 7] }).expect(200);
+    expect(res.body.settings.newsTopics).toEqual(['Sports', 'Politics']);
+  });
+
   it('creates, completes and deletes a reminder', async () => {
     const r = await request(app.getHttpServer()).post('/v1/reminders').set(auth()).send({ title: 'Call mom', time: '18:00' }).expect(201);
     let list = await request(app.getHttpServer()).get('/v1/reminders').set(auth()).expect(200);

@@ -461,6 +461,30 @@ export type NewsLang = 'en' | 'ml';
 export const NEWS_LANGS: NewsLang[] = ['en', 'ml'];
 /** Topics mixed into "For you", closest to home first. Politics is drawn from Kerala and India stories, so it isn't mixed in twice. */
 export const NEWS_TOPICS = ['Local', 'Kerala', 'India', 'World', 'Sports', 'Entertainment', 'Tech'];
+/** Topics a user can follow: the feeds, plus Politics (tagged from the news feeds). */
+export const INTEREST_TOPICS = [...NEWS_TOPICS, 'Politics'];
+
+/**
+ * "For you": take turns across topics so no single feed floods the list, closest to home first. With [interests],
+ * only those topics take turns, and the rest follow when they give fewer than 15 stories.
+ */
+export function forYou(items: NewsItem[], interests: string[] = []): NewsItem[] {
+  const picked = interests.filter((t) => INTEREST_TOPICS.includes(t));
+  const order = picked.length ? INTEREST_TOPICS.filter((t) => picked.includes(t)) : NEWS_TOPICS;
+  const groups = order.map((t) => items.filter((i) => i.topic === t || i.tags?.includes(t)));
+  const seen = new Set<string>();
+  const mixed: NewsItem[] = [];
+  for (let r = 0; mixed.length < 40 && groups.some((g) => g.length > r); r++) {
+    for (const g of groups) {
+      const it = g[r];
+      if (it && !seen.has(it.link)) { seen.add(it.link); mixed.push(it); }
+    }
+  }
+  if (picked.length && mixed.length < 15) {
+    for (const it of forYou(items)) if (mixed.length < 40 && !seen.has(it.link)) { seen.add(it.link); mixed.push(it); }
+  }
+  return mixed.slice(0, 40);
+}
 
 /**
  * Words that mark a story as political, in English and Malayalam (both spellings Malayalam sites use for some
@@ -561,7 +585,7 @@ export class NewsProvider {
   private pending = new Map<string, Promise<NewsItem[]>>();
 
   /** Per language and city; refreshes at most every 30 minutes; deduplicates by link and headline. */
-  async list(topic?: string, lang: NewsLang = 'en', city = 'Kochi'): Promise<NewsItem[]> {
+  async list(topic?: string, lang: NewsLang = 'en', city = 'Kochi', interests: string[] = []): Promise<NewsItem[]> {
     city = city.replace(/[^\p{L}\p{N} .-]/gu, '').slice(0, 40).trim() || 'Kochi';
     const key = `${lang}|${city.toLowerCase()}`;
     let items = this.cache.get(key);
@@ -575,11 +599,7 @@ export class NewsProvider {
       if (items.length) this.cache.set(key, items, 30 * 60 * 1000);
     }
     if (topic && topic !== 'all') return items.filter((i) => i.topic === topic || i.tags?.includes(topic)).slice(0, 40);
-    // "For you": take turns across topics, closest to home first, so local stories lead.
-    const groups = NEWS_TOPICS.map((t) => items.filter((i) => i.topic === t));
-    const mixed: NewsItem[] = [];
-    for (let r = 0; mixed.length < 40 && groups.some((g) => g.length > r); r++) for (const g of groups) if (g[r]) mixed.push(g[r]);
-    return mixed.slice(0, 40);
+    return forYou(items, interests);
   }
 
   private async fetch(lang: NewsLang, city: string): Promise<NewsItem[]> {
