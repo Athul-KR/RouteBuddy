@@ -8,13 +8,16 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  NotFoundException,
+  Param,
   Post,
   Res,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
 import type { Response } from 'express';
-import { UserId } from '../common/auth.js';
+import { randomBytes } from 'node:crypto';
+import { Public, UserId } from '../common/auth.js';
 import { TtlCache } from '../common/util.js';
 
 const API = 'https://api.elevenlabs.io/v1';
@@ -36,6 +39,39 @@ class SpeakDto {
   /** The voice the user picked in Settings; the server's default when left out. */
   @IsOptional() @Matches(/^[A-Za-z0-9]{8,40}$/, { message: 'Unknown voice.' }) voice?: string;
 }
+
+/**
+ * Audio being made for one reply, shared by every request for it: the chunks so far, and who is waiting for more.
+ * The player may ask for the same link more than once (it probes, or reconnects), so it is made only once.
+ */
+class AudioJob {
+  chunks: Buffer[] = [];
+  done = false;
+  failed = false;
+  private waiting = new Set<() => void>();
+
+  add(chunk: Buffer) {
+    this.chunks.push(chunk);
+    this.wake();
+  }
+  finish(failed = false) {
+    this.done = true;
+    this.failed = failed;
+    this.wake();
+  }
+  private wake() {
+    for (const w of this.waiting) w();
+    this.waiting.clear();
+  }
+  /** Chunk [i] once it exists; undefined when the audio has ended. */
+  async next(i: number): Promise<Buffer | undefined> {
+    while (i >= this.chunks.length && !this.done) await new Promise<void>((r) => this.waiting.add(r));
+    return this.chunks[i];
+  }
+}
+
+/** What a stream link plays: kept for two minutes. */
+interface Ticket { text: string; lang: 'ml' | 'en'; voice: string; job?: AudioJob }
 
 /** A voice the user can pick, as the app shows it. */
 export interface VoiceOption {
@@ -97,6 +133,7 @@ export class VoiceController {
   private log = new Logger('Voice');
   private usage = new TtlCache<number>();
   private voices = new TtlCache<VoiceOption[]>();
+  private tickets = new TtlCache<Ticket>();
 
   private key(): string {
     const k = (process.env.ELEVENLABS_API_KEY ?? '').trim().replace(/^["']|["']$/g, '').trim();
@@ -151,6 +188,68 @@ export class VoiceController {
     const j = (await res.json()) as { text?: string; language_code?: string };
     const text = (j.text ?? '').trim();
     return { text, lang: (j.language_code ?? '').slice(0, 3) };
+  }
+
+  /**
+   * Starts reading [text] aloud and returns a link the phone's player opens directly. The audio streams while
+   * ElevenLabs makes it, so playback starts in about a second instead of after the whole reply is ready.
+   * The link is unguessable and expires after two minutes; it needs no login, since a player can't send one.
+   */
+  @Post('prepare')
+  @HttpCode(200)
+  prepare(@UserId() userId: number, @Body() d: SpeakDto): { url: string } {
+    this.key();
+    const text = speakable(d.text);
+    if (!text) throw new BadRequestException('Nothing to read aloud.');
+    this.count(userId, 'tts');
+    const id = randomBytes(18).toString('base64url');
+    this.tickets.set(id, { text, lang: speechLang(text, d.lang), voice: d.voice ?? VOICE_ID }, 2 * 60 * 1000);
+    return { url: `/v1/voice/stream/${id}.mp3` };
+  }
+
+  @Public()
+  @Get('stream/:id')
+  async stream(@Param('id') raw: string, @Res() out: Response) {
+    const t = this.tickets.get(raw.replace(/\.mp3$/, ''));
+    if (!t) throw new NotFoundException('This audio has expired.');
+    if (!t.job) t.job = this.make(t);
+    const job = t.job;
+    out.setHeader('content-type', 'audio/mpeg');
+    out.setHeader('cache-control', 'no-store');
+    let gone = false;
+    out.on('close', () => { gone = true; });
+    for (let i = 0; !gone; i++) {
+      const chunk = await job.next(i);
+      if (!chunk) break;
+      out.write(chunk);
+    }
+    if (job.failed && !out.headersSent) out.status(503);
+    out.end();
+  }
+
+  /** Asks ElevenLabs for the audio and keeps the chunks as they arrive. */
+  private make(t: Ticket): AudioJob {
+    const job = new AudioJob();
+    (async () => {
+      try {
+        const res = await fetch(`${API}/text-to-speech/${t.voice}/stream?output_format=mp3_44100_64`, {
+          method: 'POST',
+          headers: { 'xi-api-key': this.key(), 'content-type': 'application/json', accept: 'audio/mpeg' },
+          body: JSON.stringify({ text: t.text, model_id: TTS_MODEL, language_code: t.lang }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!res.ok || !res.body) {
+          this.log.error(`ElevenLabs stream failed: ${res.status} ${(await res.text().catch(() => '')).slice(0, 300)}`);
+          return job.finish(true);
+        }
+        for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) job.add(Buffer.from(chunk));
+        job.finish();
+      } catch (e) {
+        this.log.error(`ElevenLabs stream failed: ${(e as Error).message}`);
+        job.finish(true);
+      }
+    })();
+    return job;
   }
 
   /** Text -> Buddy's voice, as MP3. Malayalam replies are read in Malayalam. */

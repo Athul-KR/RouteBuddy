@@ -115,6 +115,12 @@ describe('Everyday Buddy API (e2e)', () => {
     // A voice id is only letters and digits, so it can't change the ElevenLabs address.
     await request(app.getHttpServer()).post('/v1/voice/speak').set(auth()).send({ text: 'Hi', voice: '../../x' }).expect(400);
     await request(app.getHttpServer()).get('/v1/voice/voices').expect(401);
+    // Streaming: a login makes a link; the link itself needs none, and an unknown one is refused.
+    await request(app.getHttpServer()).post('/v1/voice/prepare').send({ text: 'Hi' }).expect(401);
+    await request(app.getHttpServer()).post('/v1/voice/prepare').set(auth()).send({ text: '**' }).expect(400);
+    const prep = await request(app.getHttpServer()).post('/v1/voice/prepare').set(auth()).send({ text: 'Hello there' }).expect(200);
+    expect(prep.body.url).toMatch(/^\/v1\/voice\/stream\/[A-Za-z0-9_-]{20,}\.mp3$/);
+    await request(app.getHttpServer()).get('/v1/voice/stream/not-a-real-link.mp3').expect(404);
     if (saved === undefined) delete process.env.ELEVENLABS_API_KEY; else process.env.ELEVENLABS_API_KEY = saved;
   });
 
