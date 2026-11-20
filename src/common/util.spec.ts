@@ -189,3 +189,12 @@ describe('For you news', () => {
     expect(forYou(items, ['Gossip']).map((i) => i.title)).toEqual(forYou(items).map((i) => i.title));
   });
 });
+
+import { byName } from '../providers/providers.js';
+
+describe('place search order', () => {
+  it('puts the place named like the search first, keeping the rest in order', () => {
+    const list = [{ name: 'DP Industrial' }, { name: 'Technopark Main Road' }, { name: 'Bliss Cafe' }, { name: 'Technopark' }];
+    expect(byName(list, 'technopark ').map((p) => p.name)).toEqual(['Technopark', 'Technopark Main Road', 'DP Industrial', 'Bliss Cafe']);
+  });
+});

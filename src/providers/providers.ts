@@ -643,10 +643,21 @@ export class NewsProvider {
 
 // ---------- Place search ----------
 
+/** Places whose name is what was typed first, then names starting with it, then names containing it; otherwise kept in order. */
+export function byName<T extends { name: string }>(list: T[], q: string): T[] {
+  const want = q.trim().toLowerCase();
+  const score = (p: T) => {
+    const n = p.name.trim().toLowerCase();
+    return n === want ? 3 : n.startsWith(want) ? 2 : n.includes(want) ? 1 : 0;
+  };
+  return list.map((p, i) => ({ p, i, s: score(p) })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.p);
+}
+
 export interface Place { name: string; detail: string; lat: number; lon: number }
 
 @Injectable()
 export class PlacesProvider {
+  private log = new Logger('Places');
   private countries = new TtlCache<string>();
   private results = new TtlCache<Place[]>();
 
@@ -714,7 +725,10 @@ export class PlacesProvider {
       : getJson<{ features: { properties: Record<string, string> }[] }>(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}`)
           .then((d) => (d.features[0]?.properties.countrycode ?? '').toLowerCase()).catch(() => '');
     // Everything that doesn't need the country starts at once.
-    const osmP = this.photon(q, lat, lon).catch(() => []);
+    const osmP = this.photon(q, lat, lon).catch((e: Error) => {
+      this.log.warn(`Photon search failed: ${e.message}`);
+      return [] as (Place & { cc: string })[];
+    });
     const nearP = ask(`&filter=circle:${lon},${lat},100000`, 5);
     const cc = await ccPromise;
     const [osm, gNear, gCountry] = await Promise.all([osmP, nearP, cc ? ask(`&filter=countrycode:${cc}`, 5) : Promise.resolve([])]);
@@ -722,8 +736,9 @@ export class PlacesProvider {
     // Tiers: near (within ~100 km), the rest of the country, then the world.
     // Within a tier the two sources take turns, so each one's best match shows near the top.
     const zip = (a: Place[], b: Place[]) => Array.from({ length: Math.max(a.length, b.length) }, (_, i) => [a[i], b[i]]).flat().filter((p): p is Place => !!p);
-    const near = zip(gNear, osm.filter(isNear));
-    const country = zip(gCountry, osm.filter((p) => !isNear(p) && p.cc === cc));
+    // Within a tier, places named like the search come first ("Technopark" before a shop on Technopark Road).
+    const near = byName(zip(gNear, osm.filter(isNear)), q);
+    const country = byName(zip(gCountry, osm.filter((p) => !isNear(p) && p.cc === cc)), q);
     let world = osm.filter((p) => !isNear(p) && p.cc !== cc) as Place[];
     if (near.length + country.length < 4 && key) world = [...(await ask('', 5)), ...world];
 
